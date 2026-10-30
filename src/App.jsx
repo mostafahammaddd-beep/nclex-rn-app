@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "re
 import {
   Plus, BookOpen, ImagePlus, Sparkles, RefreshCw, Save, Trash2, ArrowRight,
   Search, Copy, Check, X, HeartPulse, Lightbulb, Brain, FileText,
-  AlertTriangle, Library, KeyRound,
+  AlertTriangle, Library, KeyRound, Pencil,
 } from "lucide-react";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 
@@ -39,6 +39,13 @@ const SECTIONS = [
 ];
 
 const EMPTY_RESULT = { original_question_text: "", new_words: "", explanation: "", tricks: "" };
+
+// Speed / accuracy presets for the reasoning call (the strongest model is still used in balanced + deep).
+const MODES = {
+  turbo:    { id: "turbo",    label: "⚡ فائق السرعة", sub: "الأسرع",       tier: "flash", levels: ["medium", "low"], budget: 2048,  words: 260 },
+  balanced: { id: "balanced", label: "⚖️ متوازن",      sub: "موصى به",      tier: "pro",   levels: ["low"],           budget: 1024,  words: 340 },
+  deep:     { id: "deep",     label: "🎯 دقة قصوى",    sub: "أعمق تفكير",   tier: "pro",   levels: ["high"],          budget: 16384, words: 520 },
+};
 
 const LOADING_LINES = [
   "بنقرأ السؤال بتركيز… 🔍",
@@ -137,50 +144,69 @@ function fileToCompressedDataUrl(file) {
   });
 }
 
-function buildPrompt(extra, chipIds) {
-  const styleRules = CHIPS.filter((c) => chipIds.includes(c.id)).map((c) => `- ${c.rule}`);
+const langRules = (chipIds) => CHIPS.filter((c) => chipIds.includes(c.id)).map((c) => `- ${c.rule}`).join("\n");
+
+function buildExtractPrompt(chipIds) {
+  const english = chipIds.includes("en");
+  return `You are an OCR and medical-vocabulary assistant for NCLEX-RN students.
+
+The image is a screenshot of ONE NCLEX-style question. Return ONLY a JSON object with EXACTLY these two string keys (no markdown, no code fences, nothing else):
+{"original_question_text": "", "new_words": ""}
+
+1. original_question_text: transcribe the question exactly as shown (do NOT translate). Put the stem first, then every option on its own line written as "A) text", "B) text", and so on. For tables, exhibits or ordering lists, transcribe them line by line. Use \\n between lines.
+2. new_words: the 4 to 8 most useful medical/nursing terms from the question that a student may not know. ONE term per line, exactly in this format:
+Term — ${english ? "short English meaning" : "المعنى بالعربي باختصار"} — optional very short note
+Use \\n between lines. Do not number or bullet the lines.`;
+}
+
+function buildReasonPrompt(extra, chipIds, words) {
+  const rules = langRules(chipIds);
   const defaultLang = chipIds.includes("en") || chipIds.includes("egy")
     ? ""
-    : "- Default language: clear Arabic for explanations, but keep every medical/nursing term in English.\n";
+    : "- Default language: clear, friendly Arabic; keep every medical/nursing term in English.\n";
+  return `You are an elite NCLEX-RN educator and clinical-reasoning coach.
 
-  return `You are an elite NCLEX-RN educator and clinical reasoning coach with decades of experience.
+The image is a screenshot of ONE NCLEX-style question. Read everything in it (stem, exhibits, labs, every option). Work out the correct answer carefully (accuracy matters more than anything else), then explain it.
 
-The attached image is a screenshot of one NCLEX-style question. Carefully read everything in it (stem, exhibits, options, tables, labs).
+Return ONLY a JSON object with EXACTLY these two string keys (no markdown fences, nothing outside the JSON):
+{"explanation": "", "tricks": ""}
 
-Return ONLY one valid JSON object with EXACTLY these four string keys. No markdown, no code fences, no commentary before or after the JSON:
+The text is displayed by a custom renderer, so follow this layout strictly:
+- ONE idea per line. Separate lines with \\n. Never write a line longer than two short sentences.
+- Headings: a line that starts with "## ".
+- Bullets: lines that start with "- ".
+- Wrap key terms, option letters and the final answer in **double asterisks**.
+- No tables, no HTML.
 
-{
-  "original_question_text": "",
-  "new_words": "",
-  "explanation": "",
-  "tricks": ""
-}
+explanation layout (write the headings in the answer language):
+## What is the question really asking?
+- one line: the question type (priority / delegation / safety / pharmacology / SATA ...) and what the examiner wants
+## Reasoning
+- 2 to 4 short bullets applying the right framework (ABCs, Maslow, nursing process: assess before intervene, safety first, scope of practice)
+## Options
+- **A)** ✅ or ❌ then one short reason. Cover EVERY option. For select-all-that-apply, judge each option separately.
+## Correct answer
+- **B)** then one line explaining why
 
-Field rules:
-1. original_question_text: Transcribe the full question exactly as shown, including every option (A, B, C, D, ...) on its own line. Do not translate it.
-2. new_words: Medical/nursing terms from the question that a student might not know. One term per line in the format: English term — Arabic meaning — very short note.
-3. explanation: Deep, expert-level reasoning. First state what the question is REALLY asking (and its category, e.g. prioritization, delegation, pharmacology, safety, infection control). Then apply the right NCLEX framework (ABCs, Maslow, nursing process, safety first, assess before intervene). Then break down EVERY option: why it is right or wrong. End with the correct answer clearly stated.
-4. tricks: The hidden trap(s) in this question: tricky keywords (EXCEPT, FIRST, BEST, NEXT), attractive distractors, common student mistakes, plus one short memory tip.
+tricks layout:
+- 2 to 4 bullets, each like "**Trap name:** short explanation" (tricky keywords such as EXCEPT / FIRST / BEST / NEXT, tempting distractors, common student mistakes)
+- final line: "💡 " followed by one short memory tip
 
+Length: keep explanation + tricks under about ${words} words in total.
 Style rules:
-${defaultLang}${styleRules.length ? styleRules.join("\n") + "\n" : ""}- Use \\n for line breaks inside JSON strings.
-${extra && extra.trim() ? `\nExtra instructions from the student (follow them): ${extra.trim()}\n` : ""}
-Remember: output the JSON object only.`;
+${defaultLang}${rules ? rules + "\n" : ""}${extra && extra.trim() ? `Extra instructions from the student (follow them): ${extra.trim()}\n` : ""}Output the JSON object only.`;
 }
 
-function parseModelJson(text) {
-  let t = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+function parseJsonKeys(text, keys) {
+  const t = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const a = t.indexOf("{");
   const b = t.lastIndexOf("}");
   if (a === -1 || b === -1) throw new Error("الرد مش JSON صالح");
   const obj = JSON.parse(t.slice(a, b + 1));
   const s = (v) => (typeof v === "string" ? v : Array.isArray(v) ? v.join("\n") : v == null ? "" : String(v));
-  return {
-    original_question_text: s(obj.original_question_text),
-    new_words: s(obj.new_words),
-    explanation: s(obj.explanation),
-    tricks: s(obj.tricks),
-  };
+  const out = {};
+  keys.forEach((k) => { out[k] = s(obj[k]); });
+  return out;
 }
 
 function friendlyError(status, message) {
@@ -195,7 +221,7 @@ function friendlyError(status, message) {
 
 /* ── Networking ──
    On Android we call Google through the NATIVE Capacitor HTTP client with long timeouts
-   (Android's default 10s read timeout kills slow "thinking" Pro requests).
+   (Android's default 10s read timeout kills slow "thinking" requests).
    If native fails for a non-timeout reason, we retry once through the WebView fetch. */
 
 function normalizeResponse(status, data) {
@@ -221,7 +247,7 @@ async function rawRequest(method, url, body, readTimeoutMs) {
       const msg = String((e && e.message) || e);
       errors.push("native: " + msg);
       if (/timeout|timed out/i.test(msg)) {
-        throw Object.assign(new Error("الطلب أخد وقت طويل أوي واتقطع. جرّب تاني."), { detail: errors.join(" | ") });
+        throw Object.assign(new Error("الطلب أخد وقت طويل أوي واتقطع. جرّب وضع أسرع."), { detail: errors.join(" | ") });
       }
     }
   }
@@ -247,83 +273,115 @@ const modelRank = (n) => {
   return tier * 1000 + base - (/preview|exp/.test(n) ? 1 : 0);
 };
 
+const _dead = new Set(); // models that are unavailable for this key (404 / quota 0)
 let _modelCache = null;
+
 async function pickModels(apiKey) {
-  if (_modelCache && _modelCache.key === apiKey) return _modelCache.list;
+  if (_modelCache && _modelCache.key === apiKey) return _modelCache.lists;
   const { status, json } = await rawRequest("GET", `${API_BASE}?pageSize=200&key=${encodeURIComponent(apiKey)}`, undefined, 30000);
   if (status !== 200) {
     const msg = json?.error?.message || "";
     throw Object.assign(new Error(friendlyError(status, msg)), { detail: `HTTP ${status} ${msg}`.slice(0, 300) });
   }
-  const found = (json.models || [])
+  let found = (json.models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent") && /^models\/gemini-/.test(m.name)
       && !/image|tts|audio|live|embed|robotics|computer|learnlm|gemma|aqa|vision|deep-research|customtools/i.test(m.name))
     .map((m) => m.name.replace("models/", ""))
-    .sort((x, y) => modelRank(y) - modelRank(x))
-    .slice(0, 6);
-  const list = found.length ? found : MODEL_CANDIDATES;
-  _modelCache = { key: apiKey, list };
-  return list;
+    .sort((x, y) => modelRank(y) - modelRank(x));
+  if (!found.length) found = MODEL_CANDIDATES;
+  const pro = found.filter((n) => /pro/.test(n)).slice(0, 3);
+  const flash = found.filter((n) => !/pro/.test(n)).slice(0, 3);
+  const lists = { pro: pro.length ? pro : flash, flash: flash.length ? flash : pro };
+  _modelCache = { key: apiKey, lists };
+  return lists;
 }
 
 async function testConnection(apiKey) {
   _modelCache = null;
-  const list = await pickModels(apiKey);
-  return list[0];
+  _dead.clear();
+  const { pro, flash } = await pickModels(apiKey);
+  return `${pro[0]} + ${flash[0]}`;
 }
 
-async function analyzeImage(dataUrl, prompt, apiKey) {
-  const base64 = dataUrl.split(",")[1];
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: base64 } }] }],
-    generationConfig: {
-      temperature: 0.4,
-      maxOutputTokens: 16384,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          original_question_text: { type: "STRING" },
-          new_words: { type: "STRING" },
-          explanation: { type: "STRING" },
-          tricks: { type: "STRING" },
-        },
-        required: ["original_question_text", "new_words", "explanation", "tricks"],
-      },
-    },
-  };
+// Thinking control: Gemini 3.x uses thinkingLevel, 2.5 uses thinkingBudget. We try them in order.
+const thinkLadder = (levels, budget) => [...levels.map((l) => ({ thinkingLevel: l })), { thinkingBudget: budget }, null];
+const _thinkMemo = {};
 
-  const models = await pickModels(apiKey);
+async function callModel({ apiKey, models, ladder, parts, schema, maxOut, parse }) {
   let lastError = null;
-  for (const model of models) {
-    const { status, json } = await rawRequest(
-      "POST", `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, body, 300000
-    );
-    if (status !== 200) {
+  const alive = models.filter((m) => !_dead.has(m));
+  const order = alive.length ? alive : models;
+  for (const model of order) {
+    const memoKey = model + "|" + JSON.stringify(ladder[0]);
+    let li = _thinkMemo[memoKey] || 0;
+    while (li < ladder.length) {
+      const think = ladder[li];
+      const generationConfig = {
+        temperature: 0.3, maxOutputTokens: maxOut,
+        responseMimeType: "application/json", responseSchema: schema,
+      };
+      if (think) generationConfig.thinkingConfig = think;
+      const { status, json } = await rawRequest(
+        "POST", `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        { contents: [{ role: "user", parts }], generationConfig }, 300000
+      );
+      if (status === 200) {
+        const cand = json?.candidates?.[0];
+        const text = (cand?.content?.parts || []).filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
+        if (text) {
+          try { const data = parse(text); _thinkMemo[memoKey] = li; return { data, model }; }
+          catch (e) {
+            lastError = Object.assign(new Error("الرد جه ناقص أو بصيغة غلط. دوس Regenerate وجرّب تاني."),
+              { detail: `${model} · finish: ${cand?.finishReason || "?"}` });
+          }
+        } else {
+          lastError = Object.assign(new Error("الذكاء الاصطناعي رجّع رد فاضي. جرّب تاني."),
+            { detail: `${model} · ${cand?.finishReason || json?.promptFeedback?.blockReason || "?"}` });
+        }
+        break; // try next model
+      }
       const msg = json?.error?.message || "";
       lastError = Object.assign(new Error(friendlyError(status, msg)), { detail: `${model} · HTTP ${status} · ${msg}`.slice(0, 400) });
+      if (status === 400 && /thinking|thought/i.test(msg) && li < ladder.length - 1) { li++; continue; }
+      if (status === 404 || (status === 429 && /limit:\s*0/.test(msg))) _dead.add(model);
       const tryNext = status === 404 || status === 429 || status >= 500 ||
         /not found|no longer available|deprecated|not supported|quota|limit/i.test(msg);
-      if (tryNext) continue;
+      if (tryNext) break;
       throw lastError;
-    }
-    const cand = json?.candidates?.[0];
-    const parts = cand?.content?.parts || [];
-    const text = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
-    if (!text) {
-      lastError = Object.assign(new Error("الذكاء الاصطناعي رجّع رد فاضي. جرّب تاني."),
-        { detail: `${model} · finish: ${cand?.finishReason || json?.promptFeedback?.blockReason || "?"}` });
-      continue;
-    }
-    try {
-      return { data: parseModelJson(text), model };
-    } catch (e) {
-      lastError = Object.assign(new Error("الرد جه ناقص أو بصيغة غلط. دوس Regenerate وجرّب تاني."),
-        { detail: `${model} · finish: ${cand?.finishReason || "?"}` });
-      continue;
     }
   }
   throw lastError || new Error("مفيش موديل متاح دلوقتي.");
+}
+
+/* Two parallel calls:
+   1) fast extraction (Flash, almost no thinking): question text + new words  → shows in a few seconds
+   2) deep reasoning (Pro, controlled thinking):    explanation + tricks      → fills in when ready */
+async function analyzeStaged({ dataUrl, extra, chips, apiKey, modeId, onPart }) {
+  const mode = MODES[modeId] || MODES.balanced;
+  const { pro, flash } = await pickModels(apiKey);
+  const img = { inlineData: { mimeType: "image/jpeg", data: dataUrl.split(",")[1] } };
+  const S = { type: "STRING" };
+  const exKeys = ["original_question_text", "new_words"];
+  const reKeys = ["explanation", "tricks"];
+
+  const extract = callModel({
+    apiKey, models: [...flash, ...pro], ladder: thinkLadder(["minimal", "low"], 0),
+    parts: [img, { text: buildExtractPrompt(chips) }],
+    schema: { type: "OBJECT", properties: { original_question_text: S, new_words: S }, required: exKeys },
+    maxOut: 4096, parse: (t) => parseJsonKeys(t, exKeys),
+  });
+  const reason = callModel({
+    apiKey, models: mode.tier === "flash" ? [...flash, ...pro] : [...pro, ...flash],
+    ladder: thinkLadder(mode.levels, mode.budget),
+    parts: [img, { text: buildReasonPrompt(extra, chips, mode.words) }],
+    schema: { type: "OBJECT", properties: { explanation: S, tricks: S }, required: reKeys },
+    maxOut: 12000, parse: (t) => parseJsonKeys(t, reKeys),
+  });
+
+  const settle = (name, keys, task) =>
+    task.then(({ data, model }) => { onPart(data, name, model); return null; }).catch((error) => ({ keys, error }));
+  const results = await Promise.all([settle("extract", exKeys, extract), settle("reason", reKeys, reason)]);
+  return results.filter(Boolean);
 }
 
 const fmtDate = (ts) => {
@@ -399,6 +457,17 @@ const CSS = `
 @keyframes nx-pop{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}
 @keyframes nx-fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .nx-clamp{display:-webkit-box; -webkit-box-orient:vertical; overflow:hidden}
+html,body{touch-action:pan-y; overscroll-behavior:none; -webkit-text-size-adjust:100%}
+.nx-root{overflow-x:clip; max-width:100vw}
+.nx-area{unicode-bidi:plaintext; line-height:1.9}
+.nx-skel{height:14px; border-radius:8px; background:linear-gradient(90deg,#E6F1F1 25%,#F8FDFD 50%,#E6F1F1 75%); background-size:200% 100%; animation:nx-shimmer 1.3s linear infinite}
+@keyframes nx-shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+.nx-word{background:#fff; border-radius:16px; padding:12px 14px; border:1.5px solid rgba(122,107,240,.16); border-inline-start:5px solid var(--violet);
+  box-shadow:0 6px 16px -12px rgba(122,107,240,.5)}
+.nx-mode{display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:10px 6px; border-radius:18px; text-align:center;
+  background:#fff; border:1.5px solid rgba(14,159,148,.25); color:var(--teal-deep)}
+.nx-mode:hover{background:var(--aqua)}
+.nx-mode[data-on="true"]{background:linear-gradient(135deg,#0E9F94,#22B8D6); color:#fff; border-color:transparent; box-shadow:0 10px 20px -10px rgba(14,159,148,.85); transform:translateY(-2px)}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important}
 }
@@ -468,12 +537,12 @@ function Toast({ msg }) {
 
 function Logo({ onClick }) {
   return (
-    <button onClick={onClick} className="nx-btn flex items-center gap-3" aria-label="NCLEX-RN" style={{ direction: "ltr" }}>
-      <span className="flex items-center justify-center rounded-2xl"
-        style={{ width: 46, height: 46, background: "linear-gradient(135deg,#0E9F94,#22B8D6)", boxShadow: "0 10px 20px -8px rgba(14,159,148,.8)" }}>
-        <HeartPulse size={26} color="#fff" />
+    <button onClick={onClick} className="nx-btn flex shrink-0 items-center gap-2" aria-label="NCLEX-RN" style={{ direction: "ltr" }}>
+      <span className="flex items-center justify-center rounded-xl"
+        style={{ width: 38, height: 38, background: "linear-gradient(135deg,#0E9F94,#22B8D6)", boxShadow: "0 8px 16px -8px rgba(14,159,148,.8)" }}>
+        <HeartPulse size={22} color="#fff" />
       </span>
-      <span className="nx-logo text-2xl sm:text-3xl" style={{ color: "var(--teal-deep)" }}>NCLEX-RN</span>
+      <span className="nx-logo text-xl sm:text-3xl" style={{ color: "var(--teal-deep)", whiteSpace: "nowrap" }}>NCLEX-RN</span>
     </button>
   );
 }
@@ -488,45 +557,194 @@ function Loader() {
   }, []);
   return (
     <div className="nx-card nx-fade flex flex-col items-center gap-4 px-6 py-10 text-center" aria-live="polite">
-      <svg className="nx-ecg" width="260" height="70" viewBox="0 0 260 70" fill="none">
+      <svg className="nx-ecg" width="260" height="70" viewBox="0 0 260 70" fill="none" style={{ maxWidth: "100%" }}>
         <path d="M0 38 H60 L74 38 L84 10 L98 62 L110 38 H150 L162 38 L172 16 L184 56 L194 38 H260"
           stroke="#0E9F94" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
       <div className="text-xl font-extrabold" style={{ color: "var(--teal-deep)" }}>{LOADING_LINES[i]}</div>
-      <p className="text-sm" style={{ opacity: 0.65 }}>التحليل العميق ممكن ياخد لحد دقيقتين. سيب التطبيق مفتوح. ({sec} ث)</p>
+      <p className="text-sm" style={{ opacity: 0.65 }}>أول جزء بيظهر في ثواني، والتفصيص بيتكمل بعده. ({sec} ث)</p>
+    </div>
+  );
+}
+
+/* ── Rich text rendering: clean spacing + correct Arabic/English mixing ── */
+
+const LATIN_RUN = /[A-Za-z][A-Za-z0-9'’\-\/.%+&]*(?:[ ]+(?:[A-Za-z0-9][A-Za-z0-9'’\-\/.%+&]*|\([A-Za-z0-9 ,.'’\-\/%+&]*\)))*(?:[ ]*\([A-Za-z0-9 ,.'’\-\/%+&]*\))?/g;
+const hasArabic = (s) => /[\u0600-\u06FF]/.test(s || "");
+
+function latinWrap(t, key) {
+  const res = [];
+  let last = 0, i = 0;
+  for (const m of t.matchAll(LATIN_RUN)) {
+    if (m.index > last) res.push(t.slice(last, m.index));
+    res.push(<bdi key={`${key}-${i++}`} dir="ltr">{m[0]}</bdi>);
+    last = m.index + m[0].length;
+  }
+  if (last < t.length) res.push(t.slice(last));
+  return res;
+}
+
+function Inline({ text }) {
+  const parts = (text || "").split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <>
+      {parts.map((p, i) =>
+        /^\*\*[^*]+\*\*$/.test(p)
+          ? <strong key={i} style={{ fontWeight: 800 }}>{latinWrap(p.slice(2, -2), `b${i}`)}</strong>
+          : <React.Fragment key={i}>{latinWrap(p, `t${i}`)}</React.Fragment>
+      )}
+    </>
+  );
+}
+
+function RichText({ text, accent, ltr }) {
+  const lines = (text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const dir = !ltr && hasArabic(text) ? "rtl" : "ltr";
+  return (
+    <div dir={dir} className="flex flex-col" style={{ gap: 12, fontSize: 16, lineHeight: 1.9, overflowWrap: "anywhere" }}>
+      {lines.map((l, i) => {
+        if (/^#{1,3}\s+/.test(l)) {
+          return (
+            <h4 key={i} className="flex items-center font-black" style={{ gap: 8, marginTop: i ? 12 : 0, fontSize: 17, color: accent }}>
+              <span style={{ width: 6, height: 22, borderRadius: 6, background: accent, flexShrink: 0 }} />
+              <span className="min-w-0"><Inline text={l.replace(/^#{1,3}\s+/, "")} /></span>
+            </h4>
+          );
+        }
+        if (/^[-•*]\s+/.test(l)) {
+          return (
+            <div key={i} className="flex items-start" style={{ gap: 10 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 8, background: accent, marginTop: 14, flexShrink: 0, opacity: 0.85 }} />
+              <p className="min-w-0 flex-1"><Inline text={l.replace(/^[-•*]\s+/, "")} /></p>
+            </div>
+          );
+        }
+        const num = l.match(/^(\d+)[.)]\s+(.*)$/);
+        if (num) {
+          return (
+            <div key={i} className="flex items-start" style={{ gap: 10 }}>
+              <span className="flex shrink-0 items-center justify-center font-black"
+                style={{ width: 26, height: 26, marginTop: 4, borderRadius: 9, background: accent + "22", color: accent, fontSize: 13 }}>{num[1]}</span>
+              <p className="min-w-0 flex-1"><Inline text={num[2]} /></p>
+            </div>
+          );
+        }
+        return <p key={i}><Inline text={l} /></p>;
+      })}
+    </div>
+  );
+}
+
+function QuestionView({ text, accent }) {
+  const lines = (text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return (
+    <div dir="ltr" className="flex flex-col" style={{ gap: 10, fontSize: 16, lineHeight: 1.7, textAlign: "left", overflowWrap: "anywhere" }}>
+      {lines.map((l, i) => {
+        const m = i > 0 ? l.match(/^\(?([A-Za-z]|\d{1,2})[).:]\s*(.+)$/) : null;
+        if (m) {
+          return (
+            <div key={i} className="flex items-start" style={{ gap: 10 }}>
+              <span className="flex shrink-0 items-center justify-center font-black"
+                style={{ width: 28, height: 28, borderRadius: 10, background: accent + "22", color: accent, fontSize: 14 }}>{m[1].toUpperCase()}</span>
+              <p className="min-w-0 flex-1" style={{ paddingTop: 2 }}>{m[2]}</p>
+            </div>
+          );
+        }
+        return <p key={i} style={{ fontWeight: i === 0 ? 600 : 400 }}>{l}</p>;
+      })}
+    </div>
+  );
+}
+
+function parseWord(line) {
+  const [term, meaning, ...note] = line.split(/\s[—–]\s|\s\|\s/);
+  return { term: (term || "").trim(), meaning: (meaning || "").trim(), note: note.join(" — ").trim() };
+}
+
+function WordCard({ line, accent = "#7A6BF0" }) {
+  const { term, meaning, note } = parseWord(line);
+  const dir = hasArabic(meaning + note) ? "rtl" : "ltr";
+  return (
+    <div dir={dir} className="nx-word" style={{ borderInlineStartColor: accent }}>
+      <div className="font-extrabold" style={{ color: accent, fontSize: 17, lineHeight: 1.5 }}>
+        <bdi dir="ltr">{term}</bdi>
+      </div>
+      {meaning && <p style={{ marginTop: 4, fontSize: 15.5, lineHeight: 1.8 }}><Inline text={meaning} /></p>}
+      {note && <p style={{ marginTop: 4, fontSize: 13.5, lineHeight: 1.7, opacity: 0.65 }}><Inline text={note} /></p>}
+    </div>
+  );
+}
+
+function WordList({ text, accent }) {
+  return (
+    <div className="flex flex-col" style={{ gap: 12 }}>
+      {wordLines(text).map((l, i) => <WordCard key={i} line={l} accent={accent} />)}
+    </div>
+  );
+}
+
+function Skeleton() {
+  return (
+    <div className="flex flex-col" style={{ gap: 12 }} aria-label="جاري التحضير">
+      <div className="nx-skel" style={{ width: "92%" }} />
+      <div className="nx-skel" style={{ width: "78%" }} />
+      <div className="nx-skel" style={{ width: "86%" }} />
+      <div className="nx-skel" style={{ width: "52%" }} />
     </div>
   );
 }
 
 function ResultSection({ section, value, onChange }) {
-  const { title, sub, icon: Icon, rows, accent, tint, ltr } = section;
+  const { key, title, sub, icon: Icon, rows, accent, tint, ltr } = section;
+  const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const pending = value === null || value === undefined;
   const copy = async () => {
-    try { await navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1400); }
+    try { await navigator.clipboard.writeText(value || ""); setCopied(true); setTimeout(() => setCopied(false), 1400); }
     catch (e) { /* clipboard unavailable */ }
   };
+  const iconBtn = { width: 38, height: 38, color: accent, border: `1.5px solid ${accent}55`, background: "#fff" };
+
   return (
     <section className="nx-card nx-fade overflow-hidden" style={{ borderColor: accent + "55" }}>
-      <header className="flex items-center justify-between gap-3 px-5 py-4" style={{ background: tint }}>
-        <div className="flex items-center gap-3">
-          <span className="flex items-center justify-center rounded-2xl"
-            style={{ width: 42, height: 42, background: accent, boxShadow: `0 8px 16px -8px ${accent}` }}>
-            <Icon size={22} color="#fff" />
-          </span>
-          <div>
-            <h3 className="text-lg font-extrabold leading-tight">{title}</h3>
-            <p className="text-xs" style={{ opacity: 0.65 }}>{sub}</p>
-          </div>
+      <header className="flex items-center gap-3 px-4 py-3" style={{ background: tint }}>
+        <span className="flex shrink-0 items-center justify-center rounded-2xl"
+          style={{ width: 40, height: 40, background: accent, boxShadow: `0 8px 16px -8px ${accent}` }}>
+          <Icon size={21} color="#fff" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-base font-extrabold leading-tight sm:text-lg" style={{ whiteSpace: "nowrap" }}>{title}</h3>
+          <p className="text-xs" style={{ opacity: 0.65 }}>{sub}</p>
         </div>
-        <button onClick={copy} className="nx-btn flex items-center gap-1 rounded-full bg-white px-3 py-2 text-sm font-bold"
-          style={{ color: accent, border: `1.5px solid ${accent}55` }} aria-label={`نسخ ${title}`}>
-          {copied ? <Check size={16} /> : <Copy size={16} />}
-          <span className="hidden sm:inline">{copied ? "اتنسخ" : "نسخ"}</span>
-        </button>
+        {!pending && (
+          <div className="flex shrink-0 items-center gap-2">
+            <button onClick={() => setEditing((e) => !e)} className="nx-btn flex items-center justify-center rounded-full"
+              style={iconBtn} aria-label={editing ? "تم" : `تعديل ${title}`}>
+              {editing ? <Check size={17} /> : <Pencil size={16} />}
+            </button>
+            <button onClick={copy} className="nx-btn flex items-center justify-center rounded-full" style={iconBtn} aria-label={`نسخ ${title}`}>
+              {copied ? <Check size={17} /> : <Copy size={16} />}
+            </button>
+          </div>
+        )}
       </header>
       <div className="p-4">
-        <AutoTextArea value={value} onChange={onChange} rows={rows} ltr={ltr}
-          style={{ borderColor: accent + "44", background: "#FFFFFF" }} placeholder="اكتب أو عدّل هنا…" />
+        {pending ? (
+          <Skeleton />
+        ) : editing ? (
+          <AutoTextArea value={value} onChange={onChange} rows={rows} ltr={ltr}
+            style={{ borderColor: accent + "44", background: "#FFFFFF" }} placeholder="اكتب أو عدّل هنا…" />
+        ) : !value.trim() ? (
+          <button onClick={() => setEditing(true)} className="nx-btn nx-ghost w-full rounded-2xl px-4 py-4 text-sm font-bold">
+            فاضي. دوس هنا واكتب بنفسك
+          </button>
+        ) : key === "new_words" ? (
+          <WordList text={value} accent={accent} />
+        ) : key === "original_question_text" ? (
+          <QuestionView text={value} accent={accent} />
+        ) : (
+          <RichText text={value} accent={accent} ltr={ltr} />
+        )}
       </div>
     </section>
   );
@@ -680,27 +898,21 @@ function WordsScreen({ words, onOpen, onDeleteEntry }) {
           <p className="mt-1 text-sm" style={{ opacity: 0.7 }}>أي كلمات جديدة هتتضاف هنا تلقائياً لما تحفظ سؤال.</p>
         </div>
       ) : mode === "alpha" ? (
-        <div className="nx-card divide-y" style={{ borderColor: "rgba(14,159,148,.14)" }}>
+        <div className="flex flex-col" style={{ gap: 12 }}>
           {alpha.length === 0 && <p className="p-6 text-center text-sm" style={{ opacity: 0.7 }}>مفيش نتائج.</p>}
-          {alpha.map((x) => (
-            <div key={x.term} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-5 py-3"
-              style={{ borderColor: "rgba(14,159,148,.12)" }}>
-              <span dir="ltr" className="text-base font-extrabold" style={{ color: "var(--violet)" }}>{x.term}</span>
-              {x.rest && <span dir="auto" className="text-sm" style={{ opacity: 0.85 }}>{x.rest}</span>}
-            </div>
-          ))}
+          {alpha.map((x) => <WordCard key={x.term} line={x.rest ? `${x.term} — ${x.rest}` : x.term} />)}
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col" style={{ gap: 20 }}>
           {grouped.map((w) => (
             <div key={w.id} className="nx-card nx-fade overflow-hidden">
-              <div className="flex items-center justify-between gap-2 px-5 py-3" style={{ background: "#F3F1FF" }}>
-                <button onClick={() => onOpen(w.qid)} className="nx-btn text-start font-extrabold" style={{ color: "var(--violet)" }}>{w.title}</button>
+              <div className="flex items-center justify-between gap-2 px-4 py-3" style={{ background: "#F3F1FF" }}>
+                <button onClick={() => onOpen(w.qid)} className="nx-btn min-w-0 text-start font-extrabold" style={{ color: "var(--violet)" }}>{w.title}</button>
                 <ConfirmButton iconOnly label="حذف" onConfirm={() => onDeleteEntry(w.id)} />
               </div>
-              <ul className="flex flex-col gap-1 px-5 py-3">
-                {w.lines.map((l, i) => <li key={i} dir="auto" className="text-sm leading-7">• {l}</li>)}
-              </ul>
+              <div className="flex flex-col p-4" style={{ gap: 12 }}>
+                {w.lines.map((l, i) => <WordCard key={i} line={l} />)}
+              </div>
             </div>
           ))}
         </div>
@@ -725,11 +937,17 @@ function Editor({ initial, apiKey, onNeedKey, onSave, onDelete }) {
     } : null
   );
   const [loading, setLoading] = useState(false);
-  const [usedModel, setUsedModel] = useState("");
+  const [usedModels, setUsedModels] = useState({});
+  const [mode, setMode] = useState("balanced");
   const [error, setError] = useState(null);
   const [over, setOver] = useState(false);
   const fileRef = useRef(null);
   const resultRef = useRef(null);
+
+  useEffect(() => {
+    store.get("nclex:mode").then((m) => { if (typeof m === "string" && MODES[m]) setMode(m); });
+  }, []);
+  const pickMode = (m) => { setMode(m); store.set("nclex:mode", m); };
 
   // load stored image for existing questions
   useEffect(() => {
@@ -761,23 +979,43 @@ function Editor({ initial, apiKey, onNeedKey, onSave, onDelete }) {
       return [...cur.filter((x) => x !== c.excludes), c.id];
     });
 
+  const anyArrived = !!result && Object.values(result).some((v) => v !== null && v !== undefined);
+
   const analyze = async () => {
     if (!imageUrl) { setError({ msg: "ارفع صورة السؤال الأول." }); return; }
     if (!apiKey) { setError({ msg: "محتاج تحط مفتاح Gemini الأول. دوس على أيقونة 🔑 فوق." }); onNeedKey(); return; }
-    setLoading(true); setError(null);
+    const prev = result;
+    setLoading(true); setError(null); setUsedModels({});
+    setResult({ original_question_text: null, new_words: null, explanation: null, tricks: null });
+    setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
     try {
-      const out = await analyzeImage(imageUrl, buildPrompt(instructions, chips), apiKey);
-      setResult(out.data);
-      setUsedModel(out.model);
-      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+      const failures = await analyzeStaged({
+        dataUrl: imageUrl, extra: instructions, chips, apiKey, modeId: mode,
+        onPart: (data, name, model) => {
+          setResult((r) => ({ ...(r || EMPTY_RESULT), ...data }));
+          setUsedModels((m) => ({ ...m, [name]: model }));
+        },
+      });
+      if (failures.length) {
+        setResult((r) => {
+          const n = { ...(r || EMPTY_RESULT) };
+          failures.forEach((f) => f.keys.forEach((k) => { if (n[k] === null || n[k] === undefined) n[k] = prev?.[k] ?? ""; }));
+          return n;
+        });
+        setError({ msg: failures[0].error.message || "حصلت مشكلة.", detail: failures[0].error.detail });
+      }
     } catch (e) {
+      setResult(prev);
       setError({ msg: e.message || "حصلت مشكلة.", detail: e.detail });
     } finally { setLoading(false); }
   };
 
   const setField = (key) => (v) => setResult((r) => ({ ...(r || EMPTY_RESULT), [key]: v }));
 
-  const save = () => onSave({ title, imageUrl, instructions, chips, result: result || EMPTY_RESULT });
+  const save = () => onSave({
+    title, imageUrl, instructions, chips,
+    result: Object.fromEntries(Object.entries(result || EMPTY_RESULT).map(([k, v]) => [k, v ?? ""])),
+  });
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-32 pt-4 sm:px-6">
@@ -840,6 +1078,19 @@ function Editor({ initial, apiKey, onNeedKey, onSave, onDelete }) {
           </div>
         </div>
 
+        <div>
+          <span className="mb-2 block text-sm font-extrabold">وضع التحليل</span>
+          <div className="grid grid-cols-3 gap-2">
+            {Object.values(MODES).map((m) => (
+              <button key={m.id} type="button" data-on={mode === m.id} aria-pressed={mode === m.id}
+                onClick={() => pickMode(m.id)} className="nx-btn nx-mode">
+                <span className="text-sm font-black leading-tight">{m.label}</span>
+                <span style={{ fontSize: 11, opacity: 0.8 }}>{m.sub}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {!result && !loading && (
           <button onClick={analyze} disabled={!imageUrl}
             className="nx-btn nx-primary nx-sweep flex items-center justify-center gap-3 rounded-3xl px-6 py-5 text-xl font-black">
@@ -857,9 +1108,9 @@ function Editor({ initial, apiKey, onNeedKey, onSave, onDelete }) {
           </div>
         )}
 
-        {loading && <Loader />}
+        {loading && !anyArrived && <Loader />}
 
-        {result && !loading && (
+        {result && (!loading || anyArrived) && (
           <div ref={resultRef} className="flex flex-col gap-5" style={{ scrollMarginTop: 90 }}>
             {SECTIONS.map((s) => (
               <ResultSection key={s.key} section={s} value={result[s.key]} onChange={setField(s.key)} />
@@ -867,21 +1118,24 @@ function Editor({ initial, apiKey, onNeedKey, onSave, onDelete }) {
             <p className="text-center text-xs" style={{ opacity: 0.6 }}>
               ملحوظة: Regenerate بيستبدل أي تعديلات عملتها على النتيجة الحالية.
             </p>
-            {usedModel && <p dir="ltr" className="text-center text-xs" style={{ opacity: 0.5 }}>Model: {usedModel}</p>}
+            {Object.keys(usedModels).length > 0 && <p dir="ltr" className="text-center text-xs" style={{ opacity: 0.5 }}>Models: {[...new Set(Object.values(usedModels))].join(" + ")}</p>}
           </div>
         )}
       </div>
 
       {result && (
-        <div className="fixed inset-x-0 bottom-0 z-30 px-4 pb-4 pt-3"
-          style={{ background: "linear-gradient(180deg,transparent,rgba(244,251,251,.95) 40%)" }}>
-          <div className="mx-auto flex max-w-3xl gap-3">
-            <button onClick={analyze} disabled={loading} className="nx-btn nx-ghost flex items-center justify-center gap-2 rounded-2xl px-5 py-4 font-extrabold"
-              style={{ background: "#fff" }}>
-              <RefreshCw size={18} className={loading ? "nx-pulse" : ""} /> Regenerate 🔄
+        <div className="fixed inset-x-0 bottom-0 z-30 px-3 pt-3"
+          style={{ background: "linear-gradient(180deg,transparent,rgba(244,251,251,.96) 40%)", paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
+          <div className="mx-auto flex max-w-3xl gap-2">
+            <button onClick={analyze} disabled={loading}
+              className="nx-btn nx-ghost flex shrink-0 items-center justify-center rounded-2xl px-4 py-3 font-extrabold"
+              style={{ background: "#fff", whiteSpace: "nowrap" }}>
+              Regenerate 🔄
             </button>
-            <button onClick={save} disabled={loading} className="nx-btn nx-sun nx-sweep flex flex-1 items-center justify-center gap-2 rounded-2xl px-5 py-4 text-lg font-black">
-              <Save size={20} /> حفظ السؤال
+            <button onClick={save} disabled={loading}
+              className="nx-btn nx-sun nx-sweep flex min-w-0 flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-base font-black"
+              style={{ whiteSpace: "nowrap" }}>
+              <Save size={18} /> حفظ السؤال
             </button>
           </div>
         </div>
@@ -1041,21 +1295,22 @@ export default function App() {
       <style>{CSS}</style>
 
       <header className="sticky top-0 z-40 border-b backdrop-blur"
-        style={{ background: "rgba(244,251,251,.82)", borderColor: "rgba(14,159,148,.14)" }}>
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <Logo onClick={() => go({ name: "home" }, true)} />
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowKey(true)} aria-label="مفتاح Gemini"
-              className="nx-btn nx-ghost flex items-center justify-center rounded-full"
-              style={{ width: 40, height: 40, borderColor: apiKey ? "rgba(14,159,148,.25)" : "#FFB627", background: apiKey ? "#fff" : "#FFF7E0" }}>
-              <KeyRound size={18} color={apiKey ? "var(--teal-deep)" : "#B87400"} />
-            </button>
+        style={{ background: "rgba(244,251,251,.92)", borderColor: "rgba(14,159,148,.14)" }}>
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-2 px-3 py-2 sm:px-6 sm:py-3">
+          <div className="flex min-w-0 items-center gap-2">
             {view.name !== "home" && (
-              <button onClick={back} className="nx-btn nx-ghost flex items-center gap-2 rounded-full px-4 py-2 text-sm font-extrabold">
-                <ArrowRight size={16} /> رجوع
+              <button onClick={back} aria-label="رجوع" className="nx-btn nx-primary flex shrink-0 items-center justify-center rounded-full"
+                style={{ width: 40, height: 40 }}>
+                <ArrowRight size={20} />
               </button>
             )}
+            <Logo onClick={() => go({ name: "home" }, true)} />
           </div>
+          <button onClick={() => setShowKey(true)} aria-label="مفتاح Gemini"
+            className="nx-btn nx-ghost flex shrink-0 items-center justify-center rounded-full"
+            style={{ width: 40, height: 40, borderColor: apiKey ? "rgba(14,159,148,.25)" : "#FFB627", background: apiKey ? "#fff" : "#FFF7E0" }}>
+            <KeyRound size={18} color={apiKey ? "var(--teal-deep)" : "#B87400"} />
+          </button>
         </div>
       </header>
 

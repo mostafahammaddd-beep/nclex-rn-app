@@ -3,4 +3,5 @@
 @tailwind utilities;
 
 html, body, #root { margin: 0; min-height: 100%; }
-body { -webkit-tap-highlight-color: transparent; overscroll-behavior-y: none; }
+html, body { width: 100%; touch-action: pan-y; overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
+body { -webkit-tap-highlight-color: transparent; }
