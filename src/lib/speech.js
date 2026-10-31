@@ -6,11 +6,15 @@
      1. Gemini TTS, locked to en-US and a male prebuilt voice → the same clear American voice on every phone.
         Each word is downloaded ONCE, then kept in memory + IndexedDB (works offline and costs no extra requests).
      2. Phone TTS (speechSynthesis) with a US-English male voice picked on purpose, if Gemini is unavailable
-        (no key, no internet, quota).                                                                          */
+        (no key, no internet, quota).
+
+   Speed (v2.3): in-flight requests are shared (a tap on a word that is already being prefetched just waits for it),
+   the next words in a list are fetched in the background while you listen, and playback speed is adjustable
+   (pitch is preserved, so slow speech does not turn into a deep voice).                                        */
 
 import { useSyncExternalStore } from "react";
 import { API_BASE, rawRequest } from "./gemini.js";
-import { store } from "./storage.js";
+import { store, prefs } from "./storage.js";
 
 /* newest first; an unknown / retired model just falls through to the next one */
 const MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
@@ -43,12 +47,30 @@ export function useSpeechState(id) {
   return c.id === id ? c.state : "idle";
 }
 
+/* ── playback speed (shared by every speaker button, remembered between launches) ── */
+export const SPEEDS = [0.5, 0.75, 1, 1.25];
+let speed = (() => { const v = parseFloat(prefs.get("nclex:speed", "1")); return SPEEDS.includes(v) ? v : 1; })();
+const speedSubs = new Set();
+export const useSpeed = () =>
+  useSyncExternalStore((f) => { speedSubs.add(f); return () => speedSubs.delete(f); }, () => speed, () => speed);
+
 /* ── audio plumbing ── */
 let ctx = null;
-let src = null;
+let src = null;      // AudioBufferSource (fallback player)
+let el = null;       // <audio> element (main player: keeps the pitch when the speed changes)
+let elUrl = null;
 let token = 0;
 let goodModel = null;
 const mem = new Map();
+const inflight = new Map();
+
+export function cycleSpeed() {
+  speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+  prefs.set("nclex:speed", String(speed));
+  try { if (el) { el.defaultPlaybackRate = speed; el.playbackRate = speed; } } catch (e) { /* ignore */ }
+  try { if (src) src.playbackRate.value = speed; } catch (e) { /* ignore */ }
+  speedSubs.forEach((f) => f());
+}
 
 function getCtx() {
   const AC = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
@@ -56,6 +78,12 @@ function getCtx() {
   if (!ctx) { try { ctx = new AC(); } catch (e) { return null; } }
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
   return ctx;
+}
+
+/* the element is created inside the tap, so the browser lets it play later without asking again */
+function getEl() {
+  if (!el && typeof Audio === "function") { try { el = new Audio(); el.preload = "auto"; } catch (e) { el = null; } }
+  return el;
 }
 
 function pcmToBuffer(c, b64) {
@@ -71,8 +99,29 @@ function pcmToBuffer(c, b64) {
   return buf;
 }
 
+/* raw PCM → a tiny WAV file the <audio> element can play */
+function pcmToWavUrl(b64) {
+  const bin = atob(b64);
+  const n = bin.length;
+  const u8 = new Uint8Array(44 + n);
+  const dv = new DataView(u8.buffer);
+  const tag = (o, t) => { for (let i = 0; i < t.length; i++) u8[o + i] = t.charCodeAt(i); };
+  tag(0, "RIFF"); dv.setUint32(4, 36 + n, true); tag(8, "WAVE"); tag(12, "fmt ");
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, SAMPLE_RATE, true); dv.setUint32(28, SAMPLE_RATE * 2, true);
+  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); tag(36, "data"); dv.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) u8[44 + i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([u8], { type: "audio/wav" }));
+}
+
+function freeEl() {
+  if (el) { el.onended = null; el.onerror = null; try { el.pause(); } catch (e) { /* ignore */ } }
+  if (elUrl) { try { URL.revokeObjectURL(elUrl); } catch (e) { /* ignore */ } elUrl = null; }
+}
+
 export function stopSpeaking() {
   token += 1;
+  freeEl();
   try { if (src) { src.onended = null; src.stop(); } } catch (e) { /* already stopped */ }
   src = null;
   try { if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
@@ -93,7 +142,7 @@ async function fetchPcm(text) {
   let last = new Error("tts failed");
   for (const model of order) {
     try {
-      const { status, json } = await rawRequest("POST", `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(_key)}`, body, 25000);
+      const { status, json } = await rawRequest("POST", `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(_key)}`, body, 15000);
       if (status >= 200 && status < 300) {
         const part = (json?.candidates?.[0]?.content?.parts || []).find((p) => p.inlineData && p.inlineData.data);
         if (part) { goodModel = model; return part.inlineData.data; }
@@ -105,6 +154,36 @@ async function fetchPcm(text) {
     } catch (e) { last = e; break; } // network problem
   }
   throw last;
+}
+
+/* memory → IndexedDB → network. One shared promise per word, so a tap on a word that is
+   already being prefetched just waits for that same request instead of starting a second one. */
+function audioFor(text) {
+  if (mem.has(text)) return Promise.resolve(mem.get(text));
+  if (inflight.has(text)) return inflight.get(text);
+  const p = (async () => {
+    let b64 = await store.get(CACHE + text);
+    if (!b64) {
+      b64 = await fetchPcm(text);
+      store.set(CACHE + text, b64).catch?.(() => {});
+    }
+    mem.set(text, b64);
+    return b64;
+  })().finally(() => inflight.delete(text));
+  inflight.set(text, p);
+  return p;
+}
+
+/* Read-ahead: while you listen to one word the next few are fetched quietly (max 3 at a time, silent on errors,
+   and it backs off for a minute when Gemini says "too many requests"). */
+let coolUntil = 0;
+export function prefetch(list) {
+  if (!_key || Date.now() < coolUntil) return;
+  (list || []).slice(0, 3).forEach((raw) => {
+    const t = speakable(raw);
+    if (!t || mem.has(t) || inflight.has(t)) return;
+    audioFor(t).catch((e) => { if (e && [401, 403, 429].includes(e.status)) coolUntil = Date.now() + 60000; });
+  });
 }
 
 /* ── 2 · phone voice (fallback) ── */
@@ -126,7 +205,7 @@ function systemSpeak(text, my, id) {
     u.lang = "en-US";
     const v = pickVoice();
     if (v) u.voice = v;
-    u.rate = 0.9;
+    u.rate = 0.9 * speed;
     u.pitch = 0.85;
     u.onend = u.onerror = () => { if (token === my) setState(null, "idle"); };
     window.speechSynthesis.cancel();
@@ -140,6 +219,39 @@ const fail = (msg) => {
   try { window.dispatchEvent(new CustomEvent("nclex:speech-error", { detail: msg })); } catch (e) { /* ignore */ }
 };
 
+/* play with the Web-Audio fallback (speed works, pitch follows the speed) */
+function playBuffer(c, b64, my, id) {
+  if (!c) throw new Error("no audio context");
+  const s = c.createBufferSource();
+  s.buffer = pcmToBuffer(c, b64);
+  s.playbackRate.value = speed;
+  s.connect(c.destination);
+  s.onended = () => { if (token === my) { src = null; setState(null, "idle"); } };
+  src = s;
+  s.start();
+  setState(id, "play");
+}
+
+async function playAudio(a, c, b64, my, id) {
+  if (!a) return playBuffer(c, b64, my, id);
+  freeEl();
+  elUrl = pcmToWavUrl(b64);
+  a.src = elUrl;
+  a.defaultPlaybackRate = speed;
+  a.playbackRate = speed;
+  for (const k of ["preservesPitch", "webkitPreservesPitch", "mozPreservesPitch"]) { try { a[k] = true; } catch (e) { /* ignore */ } }
+  a.onended = () => { if (token === my) { freeEl(); setState(null, "idle"); } };
+  a.onerror = () => { if (token === my) { freeEl(); try { playBuffer(c, b64, my, id); } catch (e) { setState(null, "idle"); } } };
+  try {
+    await a.play();
+    if (token === my) setState(id, "play");
+  } catch (e) {
+    if (token !== my) return;
+    freeEl();
+    playBuffer(c, b64, my, id); // autoplay blocked or format problem → fallback player
+  }
+}
+
 /* ── public: tap once = play, tap again while it plays = stop ── */
 export async function speak(raw, id = raw) {
   const text = speakable(raw);
@@ -148,24 +260,12 @@ export async function speak(raw, id = raw) {
   stopSpeaking();
   const my = ++token;
   const c = getCtx(); // must be created/resumed inside the tap, before any await
+  const a = getEl();
   setState(id, "load");
   try {
-    let b64 = mem.get(text) || (await store.get(CACHE + text));
-    if (!b64) {
-      b64 = await fetchPcm(text);
-      if (my !== token) return;
-      mem.set(text, b64);
-      store.set(CACHE + text, b64).catch?.(() => {});
-    } else if (!mem.has(text)) mem.set(text, b64);
+    const b64 = await audioFor(text);
     if (my !== token) return;
-    if (!c) throw new Error("no audio context");
-    const s = c.createBufferSource();
-    s.buffer = pcmToBuffer(c, b64);
-    s.connect(c.destination);
-    s.onended = () => { if (token === my) { src = null; setState(null, "idle"); } };
-    src = s;
-    s.start();
-    setState(id, "play");
+    await playAudio(a, c, b64, my, id);
   } catch (e) {
     if (my !== token) return;
     if (systemSpeak(text, my, id)) return;

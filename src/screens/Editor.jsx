@@ -26,13 +26,17 @@ const Skeleton = ({ hint }) => (
   </div>
 );
 
-const ResultSection = memo(function ResultSection({ section, value, onChange, running, error, onRetry }) {
+const ResultSection = memo(function ResultSection({ section, value, onChange, running, error, onRetry, defaultOpen }) {
   const { key, title, sub, icon, rows, cls, ltr, wait } = section;
   const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const pending = value === null || value === undefined;
   const hasText = !pending && value.trim().length > 0;
   const canTool = !pending && !running && (hasText || editing);
+
+  /* a section that starts working, or fails, opens by itself so nothing important stays hidden */
+  useEffect(() => { if (running || error) setOpen(true); }, [running, !!error]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(value || ""); setCopied(true); setTimeout(() => setCopied(false), 1400); }
@@ -40,17 +44,19 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
   };
 
   return (
-    <section className={`sec ${cls}`}>
+    <section className={`sec ${cls}`} data-open={open}>
       <header className="sec-head">
-        <span className="sec-ico"><Icon name={icon} size={21} /></span>
-        <div className="sec-title">
-          <h3>
-            {title}
-            {running && hasText && <span className="live" aria-label="بيتكتب دلوقتي"><i /><i /><i /></span>}
-          </h3>
-          <p>{sub}</p>
-        </div>
-        {canTool && (
+        <button type="button" className="sec-toggle" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          <span className="sec-ico"><Icon name={icon} size={21} /></span>
+          <span className="sec-title">
+            <h3>
+              {title}
+              {running && hasText && <span className="live" aria-label="بيتكتب دلوقتي"><i /><i /><i /></span>}
+            </h3>
+            <p>{sub}</p>
+          </span>
+        </button>
+        {open && canTool && (
           <div className="sec-tools">
             <button className="iconbtn" onClick={() => setEditing((e) => !e)} aria-label={editing ? "تم" : `تعديل ${title}`}>
               <Icon name={editing ? "check" : "pencil"} size={16} />
@@ -60,8 +66,11 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
             </button>
           </div>
         )}
+        <button type="button" className="sec-chev" aria-expanded={open} aria-label={open ? `اقفل ${title}` : `افتح ${title}`} onClick={() => setOpen((o) => !o)}>
+          <Icon name="chevron" size={20} />
+        </button>
       </header>
-      <div className="sec-body">
+      {open && <div className="sec-body">
         {pending ? (
           <Skeleton hint={running ? wait : null} />
         ) : editing ? (
@@ -69,7 +78,7 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
         ) : !hasText ? (
           !running && !error && <button onClick={() => setEditing(true)} className="btn btn-ghost" style={{ width: "100%" }}>فاضي. دوس هنا واكتب بنفسك</button>
         ) : key === "new_words" ? (
-          <WordList text={value} />
+          <WordList text={value} warm={!running} />
         ) : key === "original_question_text" ? (
           <QuestionView text={value} />
         ) : (
@@ -82,7 +91,7 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
             <button className="btn btn-ghost btn-sm" onClick={() => onRetry(TASK_OF[key])}><Icon name="refresh" size={15} /> جرّب الجزء ده تاني</button>
           </div>
         )}
-      </div>
+      </div>}
     </section>
   );
 });
@@ -414,7 +423,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
               return (
                 <ResultSection key={s.key} section={s} value={result[s.key]} onChange={setField}
                   running={status[task] === "run"} error={s.key === "tricks" ? null : errors[task]}
-                  onRetry={retry} />
+                  onRetry={retry} defaultOpen={!initial} />
               );
             })}
             <p className="note-end">ملحوظة: Regenerate بيستبدل أي تعديلات عملتها على النتيجة الحالية.</p>

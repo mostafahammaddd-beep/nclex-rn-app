@@ -1,17 +1,25 @@
-import React, { memo, useMemo } from "react";
+import React, { memo, useMemo, useEffect } from "react";
 import Icon from "./Icon.jsx";
 import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
-import { speak, useSpeechState } from "../lib/speech.js";
+import { speak, prefetch, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
 
 /* ───────── pronunciation button (American male voice, see lib/speech.js) ───────── */
 
-function SpeakBtn({ text, label = "اسمع النطق" }) {
+function SpeakBtn({ text, label = "اسمع النطق", ahead }) {
   const st = useSpeechState(text);
+  const sp = useSpeed();
   return (
-    <button type="button" className="speak" data-s={st} aria-pressed={st === "play"}
-      aria-label={st === "idle" ? label : "إيقاف الصوت"} onClick={() => speak(text)}>
-      <Icon name="volume" size={18} />
-    </button>
+    <span className="speak-wrap">
+      <button type="button" className="speak" data-s={st} aria-pressed={st === "play"}
+        aria-label={st === "idle" ? label : "إيقاف الصوت"}
+        onClick={() => { speak(text); if (ahead) prefetch(ahead.split("\n")); }}>
+        <Icon name="volume" size={18} />
+      </button>
+      {/* small speed control right under the speaker: 0.5× → 0.75× → 1× → 1.25× (applies to every speaker) */}
+      <button type="button" className="speed" aria-label={`سرعة الصوت ${sp} مرة. دوس لتغييرها`} onClick={cycleSpeed}>
+        <Icon name="gauge" size={11} /><span>{sp}×</span>
+      </button>
+    </span>
   );
 }
 
@@ -135,14 +143,14 @@ export const QuestionView = memo(function QuestionView({ text }) {
 
 /* ───────── vocabulary ───────── */
 
-export const WordCard = memo(function WordCard({ line }) {
+export const WordCard = memo(function WordCard({ line, ahead }) {
   const { term, meaning, note } = parseWord(line);
   const dir = hasArabic(meaning + note) ? "rtl" : "ltr";
   return (
     <div dir={dir} className="word">
       <div className="word-top">
         <bdi dir="ltr" className="word-term">{cleanMath(term)}</bdi>
-        <SpeakBtn text={cleanMath(term)} />
+        <SpeakBtn text={cleanMath(term)} ahead={ahead} />
       </div>
       {meaning && <p className="word-mean"><Inline text={meaning} /></p>}
       {note && <p className="word-note"><Inline text={note} /></p>}
@@ -150,13 +158,17 @@ export const WordCard = memo(function WordCard({ line }) {
   );
 });
 
-export function WordList({ text, showCount = true }) {
+const termOf = (l) => cleanMath(parseWord(l).term);
+
+export function WordList({ text, showCount = true, warm = false }) {
   const lines = useMemo(() => wordLines(text), [text]);
+  /* when the list is opened (and nothing is being generated) the first words are fetched quietly, so the first tap is instant */
+  useEffect(() => { if (warm) prefetch(lines.slice(0, 3).map(termOf)); }, [warm]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div>
       {showCount && lines.length > 0 && <p className="words-count">{lines.length} كلمة / عبارة</p>}
       <div className="words">
-        {lines.map((l, i) => <WordCard key={i} line={l} />)}
+        {lines.map((l, i) => <WordCard key={i} line={l} ahead={lines.slice(i + 1, i + 3).map(termOf).join("\n")} />)}
       </div>
     </div>
   );

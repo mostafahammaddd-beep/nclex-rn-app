@@ -76,7 +76,7 @@ export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
       ) : mode === "alpha" ? (
         <div className="wlist">
           {alpha.length === 0 && <p style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>مفيش نتائج.</p>}
-          {alpha.map((x) => <WordCard key={x.term} line={x.rest ? `${x.term} — ${x.rest}` : x.term} />)}
+          {alpha.map((x, i) => <WordCard key={x.term} line={x.rest ? `${x.term} — ${x.rest}` : x.term} ahead={alpha.slice(i + 1, i + 3).map((y) => y.term).join("\n")} />)}
         </div>
       ) : openEntry ? (
         <div>
@@ -90,7 +90,7 @@ export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
           </div>
           <p className="words-count">{openEntry.lines.length} كلمة / عبارة</p>
           <div className="words">
-            {openEntry.lines.map((l, i) => <WordCard key={i} line={l} />)}
+            {openEntry.lines.map((l, i) => <WordCard key={i} line={l} ahead={openEntry.lines.slice(i + 1, i + 3).map((x) => x.split(SPLIT)[0].trim()).join("\n")} />)}
           </div>
         </div>
       ) : (

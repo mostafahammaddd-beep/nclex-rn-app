@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "./components/Icon.jsx";
-import { Brand, Toast, KeyModal } from "./components/ui.jsx";
+import { Brand, Toast, KeyModal, Confetti } from "./components/ui.jsx";
 import Home from "./screens/Home.jsx";
 import WordsScreen from "./screens/WordsScreen.jsx";
 import Editor from "./screens/Editor.jsx";
 import { store, prefs } from "./lib/storage.js";
 import { ENV_KEY, warmUp, warmConnection } from "./lib/gemini.js";
 import { resizeDataUrl } from "./lib/image.js";
-import { wordLines } from "./lib/parse.js";
+import { wordLines, studyStats } from "./lib/parse.js";
+import { saveCheer } from "./lib/motivation.js";
 import { learn } from "./lib/progress.js";
 import { setSpeechKey, stopSpeaking } from "./lib/speech.js";
 import { GOALS } from "./lib/config.js";
@@ -29,6 +30,8 @@ export default function App({ boot }) {
   const [goal, setGoal] = useState(boot.goal);
   const [perf, setPerf] = useState(boot.perf);
   const [showKey, setShowKey] = useState(false);
+  const [burst, setBurst] = useState(0);
+  const burstTimer = useRef(null);
   const [theme, setTheme] = useState(() => document.documentElement.dataset.theme || "light");
   const toastTimer = useRef(null);
   const perfRef = useRef(perf);
@@ -64,10 +67,16 @@ export default function App({ boot }) {
     if (m) m.setAttribute("content", next === "dark" ? "#061317" : "#EFF6F4");
   };
 
-  const say = (msg) => {
+  const say = (msg, ms = 2800) => {
     setToast(msg);
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(""), 2800);
+    toastTimer.current = setTimeout(() => setToast(""), ms);
+  };
+
+  const celebrate = () => {
+    setBurst(Date.now());
+    clearTimeout(burstTimer.current);
+    burstTimer.current = setTimeout(() => setBurst(0), 2600);
   };
 
   /* pronunciation: key for Gemini voice, error toast, and silence when the screen changes */
@@ -134,9 +143,15 @@ export default function App({ boot }) {
     let nextW = words.filter((w) => w.qid !== id);
     if (lines.length) nextW = [{ id: "w-" + id, qid: id, title: q.title, text: result.new_words, updatedAt: now }, ...nextW];
 
+    /* a new question: tell the person how far they are (goal / streak / level) and celebrate the big moments */
+    const statsOf = (qs) => ({ ...studyStats(qs, goal), total: qs.length });
+    const cheer = existing ? { confetti: false, msg: "" } : saveCheer(statsOf(questions), statsOf(nextQ), goal);
+
     setQuestions(nextQ); setWords(nextW);
     await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW)]);
-    say(lines.length ? `اتحفظ ✅ واتضاف ${lines.length} مصطلح للقاموس` : "اتحفظ السؤال ✅");
+    const base = lines.length ? `اتحفظ ✅ واتضاف ${lines.length} مصطلح للقاموس` : "اتحفظ السؤال ✅";
+    if (cheer.confetti) celebrate();
+    say(cheer.msg ? `اتحفظ ✅ ${cheer.msg}` : base, cheer.confetti ? 4200 : 3200);
     back();
   };
 
@@ -195,6 +210,7 @@ export default function App({ boot }) {
 
       {showKey && <KeyModal current={apiKey === ENV_KEY ? "" : apiKey} hasEnv={!!ENV_KEY} onSave={saveKey} onClose={() => setShowKey(false)} />}
       <Toast msg={toast} />
+      {burst > 0 && <Confetti key={burst} />}
     </div>
   );
 }

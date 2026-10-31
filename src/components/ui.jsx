@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import Icon from "./Icon.jsx";
 import { testConnection } from "../lib/gemini.js";
 
@@ -99,6 +99,27 @@ export function KeyModal({ current, hasEnv, onSave, onClose }) {
           <button onClick={onClose} className="btn btn-ghost">إلغاء</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/* a short, light confetti burst (pure CSS; reduced-motion users get nothing moving) */
+const CONFETTI = ["#FFC933", "#1BA8C9", "#0B8A82", "#7461EE", "#FF7F6D", "#3BD38F"];
+export function Confetti() {
+  const pieces = useMemo(() => Array.from({ length: 34 }, (_, i) => ({
+    c: CONFETTI[i % CONFETTI.length],
+    x: Math.round((Math.random() - 0.5) * 340),
+    y: Math.round(160 + Math.random() * 300),
+    r: Math.round((Math.random() - 0.5) * 900),
+    d: (Math.random() * 0.25).toFixed(2),
+    w: 7 + Math.round(Math.random() * 5),
+  })), []);
+  return (
+    <div className="confetti" aria-hidden="true">
+      {pieces.map((p, i) => (
+        <i key={i} style={{ "--c": p.c, "--x": `${p.x}px`, "--y": `${p.y}px`, "--r": `${p.r}deg`, "--d": `${p.d}s`, width: p.w, height: p.w + 5 }} />
+      ))}
     </div>
   );
 }
