@@ -491,3 +491,75 @@ img { display: block; max-width: 100%; }
 .qdetail-head { display: flex; align-items: center; gap: 10px; margin: 6px 0 14px; }
 .qdetail-head h1 { font-size: 20px; line-height: 1.4; font-weight: 900; flex: 1; min-width: 0; }
 .qdetail-actions { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+
+/* ═════════════════════════════ DESKTOP LAYOUT ═════════════════════════════
+   Phones keep the exact layout above. From 1000px up (a computer window) the app uses the whole screen:
+   home = dashboard column + question grid · editor = control panel + results · dictionary = multi-column grid. */
+.results-empty { display: none; }
+.ed-side { display: flex; flex-direction: column; gap: 18px; }   /* phones: same spacing the editor always had */
+
+@media (min-width: 1000px) {
+  .topbar-in { max-width: none; height: 68px; padding: 0 40px; }
+  .page, .page-wide { max-width: none; padding: 26px 40px 64px; }
+  .page-head { margin: 4px 0 22px; }
+  .page-head h1 { font-size: 30px; }
+
+  /* ── home: right = dashboard (sticky), left = saved questions ── */
+  .home-grid { display: grid; grid-template-columns: 440px minmax(0, 1fr); gap: 32px; align-items: start; }
+  .home-side { position: sticky; top: 92px; display: flex; flex-direction: column; gap: 16px; max-height: calc(100vh - 110px); overflow-y: auto; padding: 2px 4px 8px; scrollbar-width: thin; }
+  .home-side > * { margin-top: 0; }
+  .home-side .cta-grid { grid-template-columns: 1fr; }
+  .home-side .hero h1 { font-size: 28px; }
+  .home-main .h-sec { margin-top: 6px; }
+  .home-main .qlist { grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 14px; }
+  .qcard { padding: 12px; transition: transform .15s ease, border-color .2s ease, box-shadow .2s ease; }
+  .qcard:hover { transform: translateY(-2px); border-color: var(--teal); box-shadow: var(--shadow-2, var(--shadow-1)); }
+  .qthumb { width: 96px; min-height: 96px; }
+  .cta:hover, .btn:hover:not(:disabled), .mode:hover, .qfolder:hover { filter: brightness(1.04); }
+  .home-main .card.empty { min-height: 340px; justify-content: center; }
+
+  /* ── editor: right = control panel (sticky), left = live results ── */
+  .ed-grid { display: grid; grid-template-columns: 430px minmax(0, 1fr); gap: 28px; align-items: start; }
+  .ed-side { position: sticky; top: 92px; display: flex; flex-direction: column; gap: 18px; max-height: calc(100vh - 110px); overflow-y: auto; padding: 2px 6px 10px 2px; scrollbar-width: thin; }
+  .ed-side .preview img { max-height: 36vh; }
+  .ed-side .drop { min-height: 230px; }
+  .ed-grid .results { grid-column: 2; scroll-margin-top: 90px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+  .results > .prog, .results > .done-bar, .results > .sec-teal, .results > .sec-coral { grid-column: 1 / -1; }
+  .results-empty { display: flex; grid-column: 2; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; min-height: 58vh; padding: 40px; border-radius: 28px; border: 2px dashed var(--line-2); background: color-mix(in srgb, var(--card) 55%, transparent); }
+  .results-empty .empty-ico { width: 84px; height: 84px; display: grid; place-items: center; border-radius: 50%; background: var(--teal-soft); color: var(--teal); }
+  .results-empty b { font-size: 22px; font-weight: 900; }
+  .results-empty p { max-width: 420px; color: var(--ink-3); font-size: 15px; line-height: 1.8; }
+  .sec-body { padding: 16px 22px 20px 20px; }
+  .sec-head { padding: 14px 18px; }
+  .rt, .rt p { font-size: 16.5px; }
+  .modes { grid-template-columns: 1fr 1fr; }
+  .btn-go { min-height: 68px; }
+
+  /* ── dictionary: grids instead of one long column ── */
+  .page-head + .search, .search { max-width: 560px; }
+  .qfolders { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .wlist, .words { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 12px; align-items: start; }
+  .qdetail-head h1 { font-size: 24px; }
+
+  .modal { max-width: 500px; }
+  .toast-wrap { bottom: 32px; }
+}
+
+/* big monitors: a little more room, still never a stretched line of text */
+@media (min-width: 1500px) {
+  .page, .page-wide { padding-inline: 56px; }
+  .topbar-in { padding: 0 56px; }
+  .home-grid { grid-template-columns: 480px minmax(0, 1fr); gap: 40px; }
+  .ed-grid { grid-template-columns: 470px minmax(0, 1fr); gap: 36px; }
+  .home-main .qlist { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
+}
+@media (min-width: 2100px) {
+  .page, .page-wide { padding-inline: 96px; }
+  .topbar-in { padding: 0 96px; }
+}
+
+/* medium windows (tablet / narrow desktop): single column but wider and 2-up cards */
+@media (min-width: 720px) and (max-width: 999px) {
+  .page, .page-wide { max-width: 880px; }
+  .topbar-in { max-width: 880px; }
+}

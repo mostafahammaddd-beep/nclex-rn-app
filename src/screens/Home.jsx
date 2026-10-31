@@ -36,7 +36,8 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onWords, o
   useEffect(() => { const id = requestAnimationFrame(() => setShown(pct)); return () => cancelAnimationFrame(id); }, [pct]);
 
   return (
-    <div className="page page-wide home-in">
+    <div className="page page-wide home-in home-grid">
+      <div className="home-side">
       <section className="hero">
         <p className="hello">{greeting()}</p>
         <h1>جاهز تحل سؤال النهاردة؟</h1>
@@ -113,6 +114,9 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onWords, o
         </section>
       )}
 
+      </div>
+
+      <div className="home-main">
       <h2 className="h-sec">أسئلتك المحفوظة <span>{sorted.length}</span></h2>
 
       {sorted.length === 0 ? (
@@ -145,6 +149,7 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onWords, o
           })}
         </div>
       )}
+      </div>
     </div>
   );
 }
