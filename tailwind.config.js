@@ -1,6 +1,2 @@
-/** @type {import('tailwindcss').Config} */
-export default {
-  content: ["./index.html", "./src/**/*.{js,jsx}"],
-  theme: { extend: {} },
-  plugins: [],
-};
+// Not used anymore (kept only so an old copy in the repo gets overwritten).
+export default { content: [], theme: { extend: {} }, plugins: [] };
