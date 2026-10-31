@@ -1,27 +1,16 @@
 import React, { memo, useMemo } from "react";
 import Icon from "./Icon.jsx";
 import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
+import { speak, useSpeechState } from "../lib/speech.js";
 
-/* ───────── text-to-speech (English) ───────── */
-
-export const canSpeak = typeof window !== "undefined" && "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function";
-
-export function speak(text) {
-  if (!canSpeak) return;
-  try {
-    const u = new window.SpeechSynthesisUtterance(String(text || "").replace(/\*\*/g, ""));
-    u.lang = "en-US";
-    u.rate = 0.92;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(u);
-  } catch (e) { /* no TTS engine */ }
-}
+/* ───────── pronunciation button (American male voice, see lib/speech.js) ───────── */
 
 function SpeakBtn({ text, label = "اسمع النطق" }) {
-  if (!canSpeak) return null;
+  const st = useSpeechState(text);
   return (
-    <button type="button" className="speak" aria-label={label} onClick={() => speak(text)}>
-      <Icon name="volume" size={17} />
+    <button type="button" className="speak" data-s={st} aria-pressed={st === "play"}
+      aria-label={st === "idle" ? label : "إيقاف الصوت"} onClick={() => speak(text)}>
+      <Icon name="volume" size={18} />
     </button>
   );
 }

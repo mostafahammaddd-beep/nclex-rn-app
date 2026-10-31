@@ -66,7 +66,7 @@ function normalizeResponse(status, data) {
   return { status, json: json && typeof json === "object" ? json : {} };
 }
 
-async function rawRequest(method, url, body, timeoutMs) {
+export async function rawRequest(method, url, body, timeoutMs) {
   const errors = [];
   if (Capacitor.isNativePlatform()) {
     try {

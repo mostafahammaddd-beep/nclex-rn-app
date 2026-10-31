@@ -9,6 +9,7 @@ import { ENV_KEY, warmUp, warmConnection } from "./lib/gemini.js";
 import { resizeDataUrl } from "./lib/image.js";
 import { wordLines } from "./lib/parse.js";
 import { learn } from "./lib/progress.js";
+import { setSpeechKey, stopSpeaking } from "./lib/speech.js";
 import { GOALS } from "./lib/config.js";
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -68,6 +69,17 @@ export default function App({ boot }) {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 2800);
   };
+
+  /* pronunciation: key for Gemini voice, error toast, and silence when the screen changes */
+  const sayRef = useRef(say);
+  sayRef.current = say;
+  useEffect(() => { setSpeechKey(apiKey); }, [apiKey]);
+  useEffect(() => {
+    const h = (e) => sayRef.current(e.detail);
+    window.addEventListener("nclex:speech-error", h);
+    return () => window.removeEventListener("nclex:speech-error", h);
+  }, []);
+  useEffect(() => { stopSpeaking(); }, [view]);
 
   const go = (v, replace = false) => {
     if (replace) window.history.replaceState({ v }, "");
