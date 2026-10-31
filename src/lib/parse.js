@@ -41,6 +41,14 @@ export function cleanWords(raw, final) {
   return lines.join("\n");
 }
 
+/* SOLVE brief → text handed to the lesson writer. Without an ANSWER line it is not trustworthy, so it is dropped
+   (the writer then solves the question itself instead of treating garbage as ground truth). */
+export function cleanBrief(raw) {
+  const t = stripFences(raw || "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!/^\s*ANSWER\s*:/im.test(t)) return "";
+  return t.slice(0, 3500);
+}
+
 /* Reasoning text:  ===EXPLANATION=== … ===TRICKS=== …
    Works on any prefix of the stream (partial markers are hidden). */
 const EXP_RE = /^[ \t]*={2,}[ \t]*EXPLANATION[ \t]*={2,}[ \t]*$/im;

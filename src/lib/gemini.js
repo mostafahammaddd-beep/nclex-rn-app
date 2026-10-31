@@ -7,6 +7,11 @@
    • HEDGED fallback: if a model has not produced its first token after `hedgeMs`, the next model is started
      in parallel and the first one to answer wins (an overloaded model can no longer stall the whole task).
    • Thinking level is remembered per model (no repeated 400 round trips).
+   • "Sign of life" = any streamed part, INCLUDING Gemini's thought summaries (includeThoughts). A model that is
+     busy thinking is therefore never mistaken for a stalled one (no wasted duplicate requests), and a model that
+     dies while thinking is replaced by the next one before the user has seen anything.
+   • systemInstruction carries the static prompt → Gemini's implicit cache can reuse it between runs.
+   • Models that are unavailable for the key (404 / quota 0) are remembered for 6 h, even across app restarts.
    • If WebView fetch cannot reach Google (CORS / network), it falls back to the native Capacitor HTTP client
      (non-streaming) automatically.                                                                       */
 
@@ -95,7 +100,33 @@ const DEFAULT_LISTS = {
 const LS_MODELS = "nclex:models:v3";
 const keyTag = (k) => (k || "").slice(-8);
 let _lists = null;
-const _dead = new Set(); // unavailable for this key (404 / quota 0)
+
+/* models that are unavailable for this key (404 / quota 0): remembered across restarts for a few hours,
+   so the first analysis of a new session does not waste a round trip on a model that cannot answer */
+const LS_DEAD = "nclex:dead:v1";
+const DEAD_TTL = 6 * 3600e3;
+let _deadMem = null;
+function deadMap(apiKey) {
+  const k = keyTag(apiKey);
+  if (_deadMem && _deadMem.k === k) return _deadMem.map;
+  let map = {};
+  try { const raw = JSON.parse(window.localStorage.getItem(LS_DEAD)); if (raw && raw.k === k && raw.map) map = raw.map; } catch (e) { /* ignore */ }
+  _deadMem = { k, map };
+  return map;
+}
+const deadSet = (apiKey) => {
+  const map = deadMap(apiKey), now = Date.now();
+  return new Set(Object.keys(map).filter((m) => map[m] > now));
+};
+const addDead = (apiKey, model) => {
+  const map = deadMap(apiKey);
+  map[model] = Date.now() + DEAD_TTL;
+  try { window.localStorage.setItem(LS_DEAD, JSON.stringify({ k: keyTag(apiKey), map })); } catch (e) { /* ignore */ }
+};
+const clearDead = () => {
+  _deadMem = null;
+  try { window.localStorage.removeItem(LS_DEAD); } catch (e) { /* ignore */ }
+};
 
 const modelRank = (n) => {
   const tier = /pro/.test(n) ? 2 : /lite/.test(n) ? 0 : 1;
@@ -137,7 +168,7 @@ export async function refreshModels(apiKey, { force = false } = {}) {
     pro: pro.length ? pro : (flash.length ? flash : DEFAULT_LISTS.pro),
   };
   _lists = { k: keyTag(apiKey), t: Date.now(), lists };
-  _dead.clear();
+  clearDead();
   try { window.localStorage.setItem(LS_MODELS, JSON.stringify(_lists)); } catch (e) { /* ignore */ }
   return lists;
 }
@@ -171,7 +202,8 @@ export function warmConnection(apiKey) {
 const is2x = (model) => /gemini-2\./.test(model);
 
 function ladderFor(model, spec) {
-  const bud = { thinkingBudget: spec.budget };
+  // Gemini 2.5 Pro cannot switch thinking off (minimum 128): asking for 0 would waste a 400 round trip
+  const bud = { thinkingBudget: is2x(model) && /pro/.test(model) ? Math.max(128, spec.budget) : spec.budget };
   if (is2x(model)) return [bud, null];
   return [...spec.levels.map((l) => ({ thinkingLevel: l })), bud, null];
 }
@@ -180,10 +212,17 @@ const memoKey = (model, task) => `nclex:tl:${model}|${task}`;
 const readMemo = (model, task) => { try { return parseInt(window.localStorage.getItem(memoKey(model, task)) || "0", 10) || 0; } catch (e) { return 0; } };
 const writeMemo = (model, task, i) => { try { window.localStorage.setItem(memoKey(model, task), String(i)); } catch (e) { /* ignore */ } };
 
+const tempFor = (task) => (/^solve/.test(task) ? 0.2 : /^lesson/.test(task) ? 0.4 : 0.1);
+
 function genConfig(model, think, maxOut, task) {
   const g = { maxOutputTokens: maxOut };
-  if (is2x(model)) g.temperature = task === "reason" ? 0.3 : 0.1; // Gemini 3: keep Google's default temperature
-  if (think) g.thinkingConfig = think;
+  if (is2x(model)) g.temperature = tempFor(task); // Gemini 3: keep Google's default temperature
+  if (think) {
+    const t = { ...think };
+    // thought summaries stream while the model thinks → proof of life (never shown to the student)
+    if (t.thinkingBudget !== 0 && t.thinkingLevel !== "minimal") t.includeThoughts = true;
+    g.thinkingConfig = t;
+  }
   return g;
 }
 
@@ -191,11 +230,13 @@ function genConfig(model, think, maxOut, task) {
 
 function readParts(json) {
   const cand = json?.candidates?.[0];
-  const text = (cand?.content?.parts || []).filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
-  return { text, finish: cand?.finishReason || null, block: json?.promptFeedback?.blockReason || null };
+  const parts = cand?.content?.parts || [];
+  const text = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
+  const alive = parts.some((p) => typeof p.text === "string"); // visible text OR a thought summary
+  return { text, alive, finish: cand?.finishReason || null, block: json?.promptFeedback?.blockReason || null };
 }
 
-async function fetchStream({ apiKey, model, body, signal, onText, firstMs, idleMs = 45000 }) {
+async function fetchStream({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs = 45000 }) {
   if (signal.aborted) throw abortError();
   const url = `${API_BASE}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
   const ctrl = new AbortController();
@@ -214,6 +255,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, firstMs, idleM
     try { json = JSON.parse(payload); } catch (e) { return; }
     if (json.error) throw classify(json.error.code || 500, json.error.message || "");
     const r = readParts(json);
+    if (r.alive && onAlive) onAlive();
     if (r.finish) finish = r.finish;
     if (r.block) block = r.block;
     if (r.text) { full += r.text; onText(full); }
@@ -266,7 +308,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, firstMs, idleM
 }
 
 /* Native (non-streaming) fallback — used only if WebView fetch cannot reach Google. */
-async function nativeOnce({ apiKey, model, body, signal, onText }) {
+async function nativeOnce({ apiKey, model, body, signal, onText, onAlive }) {
   const url = `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
   let r;
   try {
@@ -281,6 +323,7 @@ async function nativeOnce({ apiKey, model, body, signal, onText }) {
   const { status, json } = normalizeResponse(r.status, r.data);
   if (status !== 200) throw classify(status, json?.error?.message || "");
   const out = readParts(json);
+  if (out.alive && onAlive) onAlive();
   if (out.text) onText(out.text);
   return out;
 }
@@ -299,13 +342,14 @@ async function streamOrNative(args) {
   return nativeOnce(args);
 }
 
-async function attemptModel({ apiKey, model, task, parts, spec, maxOut, signal, onText, firstMs, idleMs }) {
+async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs }) {
   const rungs = ladderFor(model, spec);
   let idx = Math.min(readMemo(model, task), rungs.length - 1);
   for (;;) {
     const body = { contents: [{ role: "user", parts }], generationConfig: genConfig(model, rungs[idx], maxOut, task) };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
     try {
-      const out = await streamOrNative({ apiKey, model, body, signal, onText, firstMs, idleMs });
+      const out = await streamOrNative({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs });
       if (!out.text.trim()) {
         throw Object.assign(new Error(out.block ? "السؤال اتحجب من فلتر الأمان بتاع Google. جرّب صورة تانية." : "الذكاء الاصطناعي رجّع رد فاضي. جرّب تاني."),
           { detail: `${model} · ${out.finish || out.block || "empty"}`, emptyReply: true });
@@ -321,16 +365,20 @@ async function attemptModel({ apiKey, model, task, parts, spec, maxOut, signal, 
   }
 }
 
-/* ── hedged race between models ── */
+/* ── hedged race between models ──
+   A model "claims" the race with its FIRST sign of life (a thought summary or visible text). From then on the
+   other candidates are cancelled. If the claimer dies before anything was shown, the race re-opens and the next
+   model starts at once; if text was already shown, the error is reported (we never silently switch mid-answer). */
 
-function raceModels({ models, run, hedgeMs, signal, onText }) {
+function raceModels({ apiKey, models, run, hedgeMs, signal, onText }) {
   return new Promise((resolve, reject) => {
-    const alive = models.filter((m) => !_dead.has(m));
+    const dead = deadSet(apiKey);
+    const alive = models.filter((m) => !dead.has(m));
     const order = [...new Set(alive.length ? alive : models)];
     if (!order.length) return reject(new Error("مفيش موديل متاح دلوقتي."));
 
     const ctrls = [];
-    let launched = 0, active = 0, winner = -1, settled = false, lastErr = null, hedgeTimer = null;
+    let launched = 0, active = 0, winner = -1, shown = false, settled = false, lastErr = null, hedgeTimer = null;
 
     const finish = (fn) => {
       if (settled) return;
@@ -346,6 +394,16 @@ function raceModels({ models, run, hedgeMs, signal, onText }) {
       signal.addEventListener("abort", onAbort);
     }
 
+    const claim = (i) => {
+      if (settled) return false;
+      if (winner === -1) {
+        winner = i;
+        clearTimeout(hedgeTimer);
+        ctrls.forEach((c, j) => { if (j !== i) c.abort(); });
+      }
+      return winner === i;
+    };
+
     const armHedge = () => {
       clearTimeout(hedgeTimer);
       if (winner === -1 && launched < order.length && hedgeMs) hedgeTimer = setTimeout(launch, hedgeMs);
@@ -358,26 +416,28 @@ function raceModels({ models, run, hedgeMs, signal, onText }) {
       const ctrl = new AbortController();
       ctrls[i] = ctrl;
       active++;
-      run(model, ctrl.signal, (text) => {
-        if (settled) return;
-        if (winner === -1) {
-          winner = i;
-          clearTimeout(hedgeTimer);
-          ctrls.forEach((c, j) => { if (j !== i) c.abort(); });
-        }
-        if (winner === i) onText(text, model);
-      }).then((res) => {
+      run(
+        model, ctrl.signal,
+        (text) => { if (claim(i)) { shown = true; onText(text, model); } },
+        () => { claim(i); },
+      ).then((res) => {
         active--;
-        if (settled) return;
-        if (winner === -1) winner = i;
-        if (winner === i) finish(() => resolve({ ...res, model }));
+        if (settled || !claim(i)) return;
+        finish(() => resolve({ ...res, model }));
       }).catch((err) => {
         active--;
         if (settled || ctrl.signal.aborted) return;       // lost the race on purpose
-        if (winner === i) return finish(() => reject(err)); // the winner died mid-stream
+        if (err && err.dead) addDead(apiKey, model);
+        if (winner === i) {
+          if (!shown && !err.fatal && launched < order.length) {   // died while thinking: hand over, nothing was shown
+            winner = -1; lastErr = err;
+            launch(); armHedge();
+            return;
+          }
+          return finish(() => reject(err));                 // the winner died mid-answer
+        }
         lastErr = err;
         if (err.fatal) return finish(() => reject(err));
-        if (err.dead) _dead.add(model);
         if (launched < order.length) { launch(); armHedge(); }
         else if (active === 0) finish(() => reject(lastErr));
       });
@@ -388,9 +448,9 @@ function raceModels({ models, run, hedgeMs, signal, onText }) {
 }
 
 /* public: run one task against a list of candidate models */
-export function runTask({ apiKey, models, task, parts, spec, maxOut, hedgeMs, firstMs, idleMs, signal, onText }) {
+export function runTask({ apiKey, models, task, system, parts, spec, maxOut, hedgeMs, firstMs, idleMs, signal, onText }) {
   return raceModels({
-    models, hedgeMs, signal, onText,
-    run: (model, sig, emit) => attemptModel({ apiKey, model, task, parts, spec, maxOut, signal: sig, onText: emit, firstMs, idleMs }),
+    apiKey, models, hedgeMs, signal, onText,
+    run: (model, sig, emit, alive) => attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal: sig, onText: emit, onAlive: alive, firstMs, idleMs }),
   });
 }

@@ -26,21 +26,32 @@ export const SECTIONS = [
 
 export const EMPTY_RESULT = { original_question_text: "", new_words: "", explanation: "", tricks: "" };
 
-/* Reasoning presets. `tier` decides which model family is tried first for the long explanation.
-   OCR + new-words always use the FAST tier with (almost) no thinking, in parallel with the reasoning.
-   maxOut counts the model's hidden "thinking" tokens too, so it must stay far above the visible text. */
+/* Analysis presets.
+   OCR + new-words always use the FAST tier with (almost) no thinking.
+   The lesson is built by a PIPELINE, so its wall-clock time is the longest stage, not the sum of everything:
+
+     solve  (strong model, thinks, writes only a tiny verified brief)  ──► lessonB (fast model writes it up)
+     lessonA (fast model, needs no answer: decode English + basics)    ──► runs at the same instant as `solve`
+
+   solve : tier = which model family thinks · levels (Gemini 3) / budget (Gemini 2.5) = how hard it thinks
+   write : the fast model that writes the lesson · words = length cap per part (parts run in parallel)
+   maxOut counts the hidden "thinking" tokens too, so it must stay far above the visible text.
+   hedgeMs = how long a model may show NO sign of life (not even a thought summary) before a second one starts. */
 export const MODES = {
   turbo: {
     id: "turbo", label: "فائق السرعة", sub: "الأسرع", icon: "zap",
-    tier: "fast", levels: ["low", "minimal"], budget: 1024, words: 620, hedgeMs: 12000, maxOut: 16000, idleMs: 60000,
+    solve: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 8000, hedgeMs: 7000, idleMs: 45000, firstMs: 90000 },
+    write: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 12000, hedgeMs: 6000, idleMs: 45000, firstMs: 60000, words: { a: 260, b: 380 } },
   },
   balanced: {
     id: "balanced", label: "متوازن", sub: "موصى به", icon: "scale",
-    tier: "pro", levels: ["low"], budget: 1024, words: 880, hedgeMs: 25000, maxOut: 24000, idleMs: 90000,
+    solve: { tier: "fast", levels: ["medium", "low"], budget: 4096, maxOut: 16000, hedgeMs: 12000, idleMs: 60000, firstMs: 120000 },
+    write: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 16000, hedgeMs: 7000, idleMs: 60000, firstMs: 90000, words: { a: 380, b: 560 } },
   },
   deep: {
     id: "deep", label: "دقة قصوى", sub: "أعمق تفكير", icon: "target",
-    tier: "pro", levels: ["high"], budget: 16384, words: 1150, hedgeMs: 70000, maxOut: 48000, idleMs: 180000,
+    solve: { tier: "pro", levels: ["high"], budget: 16384, maxOut: 40000, hedgeMs: 40000, idleMs: 150000, firstMs: 240000 },
+    write: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 20000, hedgeMs: 9000, idleMs: 90000, firstMs: 120000, words: { a: 480, b: 720 } },
   },
 };
 

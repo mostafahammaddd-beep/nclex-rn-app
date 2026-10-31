@@ -146,18 +146,18 @@ export default function App({ boot }) {
   const editing = view.name === "edit" && view.id ? questions.find((q) => q.id === view.id) : null;
 
   return (
-    <div className="app" dir="rtl">
+    <div className="app" dir="rtl" data-sub={view.name !== "home"}>
       <div className="paper" aria-hidden="true" />
 
       <header className="topbar">
         <div className="topbar-in">
-          <div className="tb-side">
+          <div className="tb-side tb-start">
             {view.name !== "home" && (
               <button onClick={back} aria-label="رجوع" className="iconbtn iconbtn-solid"><Icon name="back" size={20} /></button>
             )}
             <Brand onClick={() => go({ name: "home" }, true)} />
           </div>
-          <div className="tb-side">
+          <div className="tb-side tb-end">
             <button onClick={toggleTheme} aria-label={theme === "dark" ? "الوضع النهاري" : "الوضع الليلي"} className="iconbtn">
               <Icon name={theme === "dark" ? "sun" : "moon"} size={19} />
             </button>

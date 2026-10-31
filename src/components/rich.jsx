@@ -45,8 +45,27 @@ function latinWrap(t, key) {
   return res;
 }
 
+
+/* ───────── strip LaTeX / markup leftovers the model sometimes emits ($K^+$, \\rightarrow …) ───────── */
+const SUP = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","−":"⁻","n":"ⁿ" };
+const SUB = { "0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","+":"₊","-":"₋" };
+const mapChars = (s, tbl) => { let o = ""; for (const c of s) { if (!(c in tbl)) return null; o += tbl[c]; } return o; };
+const ARROWS = { rightarrow: "→", to: "→", leftarrow: "←", uparrow: "↑", downarrow: "↓", geq: "≥", ge: "≥", leq: "≤", le: "≤", approx: "≈", times: "×", pm: "±", neq: "≠", degree: "°" };
+
+export function cleanMath(s) {
+  if (!s || !/[$\\^_`]/.test(s)) return s;
+  return s
+    .replace(/\$\$?([^$\n]{1,80}?)\$\$?/g, "$1")
+    .replace(/\\(?:text|mathrm|mathbf|textbf|mathit)\{([^}]*)\}/g, "$1")
+    .replace(/\\([A-Za-z]+)/g, (m, w) => ARROWS[w.toLowerCase()] || "")
+    .replace(/\\([%&#_$])/g, "$1")
+    .replace(/\^\{?([0-9+\-−n]{1,4})\}?/g, (m, g) => mapChars(g, SUP) ?? m)
+    .replace(/([A-Za-z\)])_\{?([0-9+\-]{1,3})\}?/g, (m, a, g) => a + (mapChars(g, SUB) ?? "_" + g))
+    .replace(/[`$]/g, "");
+}
+
 export function Inline({ text }) {
-  const parts = (text || "").split(/(\*\*[^*]+\*\*)/g);
+  const parts = cleanMath(text || "").split(/(\*\*[^*]+\*\*)/g);
   return (
     <>
       {parts.map((p, i) =>
@@ -133,8 +152,8 @@ export const WordCard = memo(function WordCard({ line }) {
   return (
     <div dir={dir} className="word">
       <div className="word-top">
-        <bdi dir="ltr" className="word-term">{term}</bdi>
-        <SpeakBtn text={term} />
+        <bdi dir="ltr" className="word-term">{cleanMath(term)}</bdi>
+        <SpeakBtn text={cleanMath(term)} />
       </div>
       {meaning && <p className="word-mean"><Inline text={meaning} /></p>}
       {note && <p className="word-note"><Inline text={note} /></p>}

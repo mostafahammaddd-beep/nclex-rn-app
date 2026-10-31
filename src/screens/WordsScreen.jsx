@@ -4,11 +4,17 @@ import { ConfirmButton } from "../components/ui.jsx";
 import { WordCard } from "../components/rich.jsx";
 import { wordLines } from "../lib/parse.js";
 
+const fmtDate = (ts) => {
+  try { return new Date(ts).toLocaleDateString("ar-EG", { day: "numeric", month: "short" }); }
+  catch (e) { return ""; }
+};
+
 const SPLIT = /\s[—–]\s|\s-\s/;
 
 export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
   const [q, setQ] = useState("");
-  const [mode, setMode] = useState("alpha");
+  const [mode, setMode] = useState("byq");
+  const [openId, setOpenId] = useState(null);
   const [copied, setCopied] = useState(false);
   const needle = q.trim().toLowerCase();
 
@@ -33,6 +39,8 @@ export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
     [words, needle]
   );
 
+  const openEntry = openId ? grouped.find((g) => g.id === openId) : null;
+
   const copyAll = async () => {
     const text = alpha.map((x) => (x.rest ? `${x.term} — ${x.rest}` : x.term)).join("\n");
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1400); }
@@ -54,8 +62,8 @@ export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
       </div>
 
       <div className="seg">
-        {[["alpha", "أبجدي"], ["byq", "حسب السؤال"]].map(([id, label]) => (
-          <button key={id} onClick={() => setMode(id)} data-on={mode === id} className="chip">{label}</button>
+        {[["byq", "حسب السؤال"], ["alpha", "أبجدي"]].map(([id, label]) => (
+          <button key={id} onClick={() => { setMode(id); setOpenId(null); }} data-on={mode === id} className="chip">{label}</button>
         ))}
       </div>
 
@@ -70,18 +78,34 @@ export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
           {alpha.length === 0 && <p style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>مفيش نتائج.</p>}
           {alpha.map((x) => <WordCard key={x.term} line={x.rest ? `${x.term} — ${x.rest}` : x.term} />)}
         </div>
+      ) : openEntry ? (
+        <div>
+          <div className="qdetail-head">
+            <button onClick={() => setOpenId(null)} className="iconbtn" aria-label="كل الأسئلة"><Icon name="back" size={19} /></button>
+            <h1 dir="auto">{openEntry.title}</h1>
+          </div>
+          <div className="qdetail-actions">
+            <button onClick={() => onOpen(openEntry.qid)} className="btn btn-ghost btn-sm"><Icon name="fileText" size={16} /> افتح السؤال</button>
+            <ConfirmButton label="حذف الكلمات" onConfirm={() => { onDeleteEntry(openEntry.id); setOpenId(null); }} />
+          </div>
+          <p className="words-count">{openEntry.lines.length} كلمة / عبارة</p>
+          <div className="words">
+            {openEntry.lines.map((l, i) => <WordCard key={i} line={l} />)}
+          </div>
+        </div>
       ) : (
-        <div className="stack">
+        <div className="qfolders">
+          {grouped.length === 0 && <p style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>مفيش نتائج.</p>}
           {grouped.map((w) => (
-            <div key={w.id} className="card group">
-              <div className="group-head">
-                <button onClick={() => onOpen(w.qid)} className="t">{w.title}</button>
-                <ConfirmButton iconOnly label="حذف" onConfirm={() => onDeleteEntry(w.id)} />
-              </div>
-              <div className="group-body">
-                {w.lines.map((l, i) => <WordCard key={i} line={l} />)}
-              </div>
-            </div>
+            <button key={w.id} onClick={() => setOpenId(w.id)} className="card qfolder">
+              <span className="qf-ico"><Icon name="bookOpen" size={22} /></span>
+              <span className="qf-body">
+                <h3 dir="auto">{w.title}</h3>
+                <p>{fmtDate(w.updatedAt)}</p>
+              </span>
+              <span className="qf-count">{w.lines.length}</span>
+              <span className="qf-go"><Icon name="back" size={18} /></span>
+            </button>
           ))}
         </div>
       )}

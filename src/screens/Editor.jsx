@@ -110,6 +110,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   const [runId, setRunId] = useState(0);
   const [over, setOver] = useState(false);
   const [lastRun, setLastRun] = useState(null);  // { sec } of the last completed run
+  const [timing, setTiming] = useState({});     // task → measured timings of the last run (shown under the result)
 
   const fileRef = useRef(null);
   const resultRef = useRef(null);
@@ -193,6 +194,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   };
 
   const onDone = (name, m) => {
+    setTiming((t) => ({ ...t, [name]: m }));
     settle(tracker.current, name, "done");
     setStatus((s) => ({ ...s, [name]: "done" }));
     setErrors((e) => { if (!e[name]) return e; const n = { ...e }; delete n[name]; return n; });
@@ -239,7 +241,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
     prev.current = result;
     tracker.current = createTracker(mode, perfRef.current);
     setSnap(snapshot(tracker.current));
-    setError(null); setErrors({}); setModels({}); setLastRun(null);
+    setError(null); setErrors({}); setModels({}); setLastRun(null); setTiming({});
     setResult({ ...NULLS });
     setStatus({ ocr: "run", words: "run", reason: "run" });
     an.current = makeAnalysis();
@@ -296,6 +298,13 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   ];
 
   const usedModels = [...new Set(Object.values(models))].join(" + ");
+  /* measured, not estimated: where the time really went in this run (helps to spot a slow model or network) */
+  const sec1 = (ms) => `${(ms / 1000).toFixed(1)}ث`;
+  const timingLine = [
+    timing.ocr && `قراءة ${sec1(timing.ocr.ms)}`,
+    timing.words && `كلمات ${sec1(timing.words.ms)}`,
+    timing.reason?.stages && `حلّ ${timing.reason.stages.solve}ث · أساس ${timing.reason.stages.a}ث · تفصيص ${timing.reason.stages.b}ث`,
+  ].filter(Boolean).join(" · ");
   const errCount = Object.values(status).filter((s) => s === "error").length;
 
   return (
@@ -397,6 +406,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
                 <Icon name={errCount ? "alert" : "check"} size={18} />
                 {errCount ? "خلص، بس جزء فيه مشكلة (تحت)" : lastRun.stopped ? "اتوقف التحليل قبل ما يخلص" : `خلص التحليل في ${lastRun.sec} ث`}
                 {usedModels && <small>{usedModels}</small>}
+                {timingLine && <small style={{ width: "100%", marginInlineStart: 0, direction: "rtl", textAlign: "start", opacity: .85 }}>⏱ {timingLine}</small>}
               </div>
             )}
             {SECTIONS.map((s) => {

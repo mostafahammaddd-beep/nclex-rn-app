@@ -4,14 +4,15 @@
    (stored as an exponential moving average), so the countdown becomes accurate over time. */
 
 export const DEFAULT_PERF = {
-  ocr:               { ms: 3200,  chars: 520 },
-  words:             { ms: 7000,  chars: 1100 },
-  "reason:turbo":    { ms: 15000, chars: 2900 },
-  "reason:balanced": { ms: 28000, chars: 3800 },
-  "reason:deep":     { ms: 55000, chars: 4800 },
+  ocr:                { ms: 2800,  chars: 520 },
+  words:              { ms: 6500,  chars: 1100 },
+  "reason2:turbo":    { ms: 10000, chars: 2300 },
+  "reason2:balanced": { ms: 15000, chars: 3300 },
+  "reason2:deep":     { ms: 38000, chars: 4300 },
 };
 
-export const perfKey = (task, modeId) => (task === "reason" ? `reason:${modeId}` : task);
+// "reason2": the lesson is now a parallel pipeline, so numbers learned from the old single-stream version are ignored
+export const perfKey = (task, modeId) => (task === "reason" ? `reason2:${modeId}` : task);
 
 const fresh = (k, perf, now) => {
   const p = perf[k] || DEFAULT_PERF[k];
