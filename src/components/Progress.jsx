@@ -56,20 +56,3 @@ export function Monitor({ snap, steps, onStop }) {
     </section>
   );
 }
-
-/* compact version that lives in the bottom dock while the analysis runs */
-export function DockProgress({ snap, onStop }) {
-  return (
-    <div className="dock-prog" aria-live="polite">
-      <b className="pct">{snap.percent}%</b>
-      <div className="mid">
-        <div className="row">
-          <b>{snap.almost ? "لحظات…" : `فاضل ${fmtRemaining(snap.remainingSec)}`}</b>
-          <span>جاري التحليل</span>
-        </div>
-        <div className="prog-bar"><i style={{ width: `${snap.percent}%` }} /></div>
-      </div>
-      <button type="button" className="iconbtn" onClick={onStop} aria-label="إيقاف التحليل"><Icon name="stop" size={15} /></button>
-    </div>
-  );
-}

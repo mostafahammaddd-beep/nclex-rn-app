@@ -12,6 +12,7 @@ import { saveCheer } from "./lib/motivation.js";
 import { learn } from "./lib/progress.js";
 import { setSpeechKey, stopSpeaking } from "./lib/speech.js";
 import { GOALS } from "./lib/config.js";
+import { hideSplash } from "./lib/splash.js";
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -36,16 +37,14 @@ export default function App({ boot }) {
   const toastTimer = useRef(null);
   const perfRef = useRef(perf);
   perfRef.current = perf;
+  /* always-current copies of the lists: auto-save can fire twice before React re-renders, and must never see a stale list */
+  const qRef = useRef(questions);
+  const wRef = useRef(words);
+  qRef.current = questions;
+  wRef.current = words;
 
-  /* the splash from index.html fades out right after the first real paint */
-  useEffect(() => {
-    const el = document.getElementById("splash");
-    if (!el) return;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      el.classList.add("out");
-      setTimeout(() => el.remove(), 380);
-    }));
-  }, []);
+  /* the launch splash (native icon screen + the cover in index.html) is handed over to the app after the first real paint */
+  useEffect(() => { hideSplash(); }, []);
 
   /* warm the network while the user is still choosing a picture */
   useEffect(() => { warmUp(apiKey); warmConnection(apiKey); }, [apiKey]);
@@ -119,45 +118,55 @@ export default function App({ boot }) {
     store.set("nclex:perf", next);
   }, []);
 
-  const saveQuestion = async ({ title, imageUrl, instructions, chips, result }) => {
-    const existing = view.id ? questions.find((q) => q.id === view.id) : null;
-    const id = existing?.id || uid();
+  /* Auto-save, called by the editor (it never navigates away).
+     `id` is empty only for the very first save of a new question; after that the editor keeps sending the same id,
+     so every later save updates that one question instead of creating a copy. */
+  const saveQuestion = async ({ id: knownId, title, imageUrl, imageChanged, instructions, chips, result }) => {
+    const id = knownId || uid();
+    const existing = qRef.current.find((q) => q.id === id) || null;
     const now = Date.now();
     let thumb = existing?.thumb || null;
-    if (imageUrl) {
-      try { thumb = await resizeDataUrl(imageUrl, 360, 0.6); } catch (e) { /* keep old thumb */ }
-      const ok = await store.set(`nclex:img:${id}`, { data: imageUrl });
-      if (!ok) say("الصورة كبيرة والتخزين ممتلئ، اتحفظ النص بس");
-    } else {
-      await store.del(`nclex:img:${id}`);
-      thumb = null;
+    if (!existing || imageChanged) {
+      if (imageUrl) {
+        try { thumb = await resizeDataUrl(imageUrl, 360, 0.6); } catch (e) { /* keep old thumb */ }
+        const ok = await store.set(`nclex:img:${id}`, { data: imageUrl });
+        if (!ok) say("الصورة كبيرة والتخزين ممتلئ، اتحفظ النص بس");
+      } else {
+        await store.del(`nclex:img:${id}`);
+        thumb = null;
+      }
     }
     const q = {
       id, title: title.trim() || titleFrom(result.original_question_text), ...result, instructions, chips,
       thumb, createdAt: existing?.createdAt || now, updatedAt: now,
     };
-    const nextQ = existing ? questions.map((x) => (x.id === id ? q : x)) : [q, ...questions];
+    const prevQ = qRef.current;
+    const nextQ = existing ? prevQ.map((x) => (x.id === id ? q : x)) : [q, ...prevQ];
 
     // auto-sync new words → global dictionary
     const lines = wordLines(result.new_words);
-    let nextW = words.filter((w) => w.qid !== id);
+    let nextW = wRef.current.filter((w) => w.qid !== id);
     if (lines.length) nextW = [{ id: "w-" + id, qid: id, title: q.title, text: result.new_words, updatedAt: now }, ...nextW];
 
     /* a new question: tell the person how far they are (goal / streak / level) and celebrate the big moments */
     const statsOf = (qs) => ({ ...studyStats(qs, goal), total: qs.length });
-    const cheer = existing ? { confetti: false, msg: "" } : saveCheer(statsOf(questions), statsOf(nextQ), goal);
+    const cheer = existing ? { confetti: false, msg: "" } : saveCheer(statsOf(prevQ), statsOf(nextQ), goal);
 
+    qRef.current = nextQ; wRef.current = nextW;
     setQuestions(nextQ); setWords(nextW);
     await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW)]);
-    const base = lines.length ? `اتحفظ ✅ واتضاف ${lines.length} مصطلح للقاموس` : "اتحفظ السؤال ✅";
-    if (cheer.confetti) celebrate();
-    say(cheer.msg ? `اتحفظ ✅ ${cheer.msg}` : base, cheer.confetti ? 4200 : 3200);
-    back();
+    if (!existing) {   // only the first save speaks; later silent updates (edits) don't pop a message each time
+      const base = lines.length ? `اتحفظ تلقائي ✅ واتضاف ${lines.length} مصطلح للقاموس` : "اتحفظ السؤال تلقائي ✅";
+      if (cheer.confetti) celebrate();
+      say(cheer.msg ? `اتحفظ ✅ ${cheer.msg}` : base, cheer.confetti ? 4200 : 3200);
+    }
+    return id;
   };
 
   const deleteQuestion = async (id) => {
-    const nextQ = questions.filter((q) => q.id !== id);
-    const nextW = words.filter((w) => w.qid !== id);
+    const nextQ = qRef.current.filter((q) => q.id !== id);
+    const nextW = wRef.current.filter((w) => w.qid !== id);
+    qRef.current = nextQ; wRef.current = nextW;
     setQuestions(nextQ); setWords(nextW);
     await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`)]);
     say("اتحذف السؤال");
@@ -165,7 +174,8 @@ export default function App({ boot }) {
   };
 
   const deleteWordEntry = async (wid) => {
-    const nextW = words.filter((w) => w.id !== wid);
+    const nextW = wRef.current.filter((w) => w.id !== wid);
+    wRef.current = nextW;
     setWords(nextW);
     await store.set("nclex:words", nextW);
   };

@@ -6,7 +6,6 @@
 export const DEFAULT_PERF = {
   ocr:                { ms: 2800,  chars: 520 },
   words:              { ms: 6500,  chars: 1100 },
-  "reason2:turbo":    { ms: 10000, chars: 2300 },
   "reason2:balanced": { ms: 15000, chars: 3300 },
   "reason2:deep":     { ms: 38000, chars: 4300 },
 };

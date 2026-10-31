@@ -7,11 +7,14 @@ import "@fontsource/cairo/900.css";
 import "./styles.css";
 import App from "./App.jsx";
 import { loadBoot } from "./lib/storage.js";
+import { splashFailsafe } from "./lib/splash.js";
 
 /* ───────── start-up ─────────
    The app is painted as soon as (a) the Cairo faces are loaded (local files, capped at 0.5 s) and (b) the saved data is read.
-   Both happen in parallel behind a plain page-coloured cover (no logo / picture), so the app just appears:
-   no spinner, no layout jump. */
+   Both happen in parallel while the launch splash (app icon on the brand teal) is still on screen; App.jsx then asks
+   src/lib/splash.js to fade it out once the first real screen is drawn: no white frame, no spinner, no layout jump. */
+
+splashFailsafe(5000);
 
 const FACES = ["400", "600", "700", "900"];
 const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);

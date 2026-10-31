@@ -14,13 +14,12 @@
       } catch (e) { document.documentElement.setAttribute("data-theme", "light"); }
     </script>
     <style>
-      /* No logo / picture on start-up: the very first frame is just the app's own page colour (light or dark),
-         so the app simply appears. The cover below only exists to hide the half-loaded page for a split second. */
-      html, body { margin: 0; background: #EFF6F4; }
-      html[data-theme="dark"], html[data-theme="dark"] body { background: #061317; }
-      #splash { position: fixed; inset: 0; z-index: 9999; background: #EFF6F4; }
-      html[data-theme="dark"] #splash { background: #061317; }
-      #splash small { position: absolute; bottom: 14%; left: 0; right: 0; text-align: center; color: #5B7A80; font: 600 14px system-ui, sans-serif; opacity: 0; transition: opacity .3s; padding: 0 24px; }
+      /* The page behind the native launch splash is the same brand teal as the splash itself, so there is never a
+         pale / white frame at any point of start-up. The native splash (icon on teal) is held by the Capacitor
+         plugin until the first real screen has painted; src/lib/splash.js then fades it out. */
+      html, body { margin: 0; background: #1CA3BE; }
+      #splash { position: fixed; inset: 0; z-index: 9999; background: #1CA3BE; }
+      #splash small { position: absolute; bottom: 14%; left: 0; right: 0; text-align: center; color: #fff; font: 600 14px system-ui, sans-serif; opacity: 0; transition: opacity .3s; padding: 0 24px; }
       #splash.slow small { opacity: 1; }
     </style>
   </head>

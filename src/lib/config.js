@@ -38,11 +38,6 @@ export const EMPTY_RESULT = { original_question_text: "", new_words: "", explana
    maxOut counts the hidden "thinking" tokens too, so it must stay far above the visible text.
    hedgeMs = how long a model may show NO sign of life (not even a thought summary) before a second one starts. */
 export const MODES = {
-  turbo: {
-    id: "turbo", label: "فائق السرعة", sub: "الأسرع", icon: "zap",
-    solve: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 8000, hedgeMs: 7000, idleMs: 45000, firstMs: 90000 },
-    write: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 12000, hedgeMs: 6000, idleMs: 45000, firstMs: 60000, words: { a: 260, b: 380 } },
-  },
   balanced: {
     id: "balanced", label: "متوازن", sub: "موصى به", icon: "scale",
     solve: { tier: "fast", levels: ["medium", "low"], budget: 4096, maxOut: 16000, hedgeMs: 12000, idleMs: 60000, firstMs: 120000 },

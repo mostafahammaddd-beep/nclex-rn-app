@@ -2,8 +2,14 @@
   "appId": "com.nclexrn.app",
   "appName": "NCLEX-RN",
   "webDir": "dist",
-  "backgroundColor": "#EFF6F4",
+  "backgroundColor": "#1CA3BE",
   "plugins": {
-    "CapacitorHttp": { "enabled": false }
+    "CapacitorHttp": {
+      "enabled": false
+    },
+    "SplashScreen": {
+      "launchAutoHide": false,
+      "launchFadeOutDuration": 300
+    }
   }
 }

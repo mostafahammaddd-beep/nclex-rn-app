@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from "react";
 import Icon from "../components/Icon.jsx";
 import { AutoTextArea, ConfirmButton } from "../components/ui.jsx";
-import { Monitor, DockProgress } from "../components/Progress.jsx";
+import { Monitor } from "../components/Progress.jsx";
 import { RichText, QuestionView, WordList } from "../components/rich.jsx";
 import { CHIPS, MODES, SECTIONS, EMPTY_RESULT } from "../lib/config.js";
 import { createAnalysis, TASK_KEYS } from "../lib/analysis.js";
@@ -136,9 +136,72 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   const running = Object.values(status).some((s) => s === "run");
   const started = !!result;
 
+  /* ── auto-save ──
+     A finished analysis saves itself; later edits (text, title, instructions, picture) are saved a moment after you stop.
+     The first save creates the question, every later save updates that same question (same id), so there are no copies. */
+  const [savedId, setSavedId] = useState(initial?.id || null);
+  const [imgRev, setImgRev] = useState(0);                                    // bumps only when the person changes / removes the picture
+  const savedIdRef = useRef(initial?.id || null);
+  const savedImgRev = useRef(initial ? 0 : -1);
+  const lastSig = useRef(null);       // what is already stored; unchanged content is never re-saved
+  const saveTimer = useRef(0);
+  const pendingSave = useRef(false);
+  const busy = useRef(false);
+  const again = useRef(false);
+  const autoOK = useRef(!!initial);   // a run the person stopped half-way is never saved by itself
+  const gone = useRef(false);
+  const savePromise = useRef(null);
+  const latest = useRef(null);
+  const sigNow = JSON.stringify([title, instructions, chips, result, imgRev]);
+  latest.current = { title, imageUrl, instructions, chips, result, imgRev, sig: sigNow, onSave };
+
+  const persist = useCallback(() => {
+    pendingSave.current = false;
+    if (busy.current) { again.current = true; return savePromise.current; }
+    busy.current = true;
+    savePromise.current = (async () => {
+      try {
+        do {
+          again.current = false;
+          const L = latest.current;
+          if (gone.current || !L.result || L.sig === lastSig.current) break;
+          const id = await L.onSave({
+            id: savedIdRef.current, title: L.title, imageUrl: L.imageUrl, imageChanged: L.imgRev !== savedImgRev.current,
+            instructions: L.instructions, chips: L.chips,
+            result: Object.fromEntries(Object.entries(L.result).map(([k, v]) => [k, v ?? ""])),
+          });
+          if (id) { savedIdRef.current = id; setSavedId(id); }
+          lastSig.current = L.sig;
+          savedImgRev.current = L.imgRev;
+          setError((cur) => (cur && cur.saveFail ? null : cur));   // a save that failed earlier has now gone through
+        } while (again.current);
+      } catch (err) {
+        // nothing is shown while saving works; only a real failure speaks (and leaving the screen tries once more)
+        pendingSave.current = true;
+        setError({ msg: "السؤال ماتحفظش. اتأكد إن في مساحة فاضية على الموبايل وجرّب تعدّل أي حاجة أو ارجع تاني.", saveFail: true });
+      } finally {
+        busy.current = false;
+      }
+    })();
+    return savePromise.current;
+  }, []);
+
   /* ── housekeeping ── */
   useEffect(() => { warmConnection(apiKey); }, [apiKey]);
-  useEffect(() => () => { an.current?.cancel(); clearTimeout(timer.current); }, []);
+  useEffect(() => () => {
+    an.current?.cancel(); clearTimeout(timer.current);
+    clearTimeout(saveTimer.current);
+    if (pendingSave.current && !gone.current) persist();   // leaving right after an edit: save it now
+  }, [persist]);
+
+  /* the app going to the background (or being switched away from) must not lose a pending edit either */
+  useEffect(() => {
+    const h = () => {
+      if (document.visibilityState === "hidden" && pendingSave.current) { clearTimeout(saveTimer.current); persist(); }
+    };
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+  }, [persist]);
 
   useEffect(() => {
     if (!initial?.id) return;
@@ -151,7 +214,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
 
   const takeFile = useCallback(async (file) => {
     if (!file || !file.type.startsWith("image/")) { setError({ msg: "الملف لازم يكون صورة." }); return; }
-    try { setImageUrl(await fileToCompressedDataUrl(file)); setError(null); warmConnection(apiKey); }
+    try { setImageUrl(await fileToCompressedDataUrl(file)); setImgRev((n) => n + 1); setError(null); warmConnection(apiKey); }
     catch (e) { setError({ msg: e.message }); }
   }, [apiKey]);
 
@@ -237,6 +300,21 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   };
   useEffect(() => { if (started && !running) finish(status); }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* a finished run (even with a failed part, which "retry" later fixes in the same question) is saved; a stopped one is not */
+  useEffect(() => {
+    if (!started || running) return;
+    const vals = Object.values(status);
+    if (vals.length) autoOK.current = !vals.includes("stopped");
+  }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (lastSig.current === null && initial) { lastSig.current = sigNow; return; }   // just opening a saved question is not an edit
+    if (running || !autoOK.current || !result || sigNow === lastSig.current) return;
+    pendingSave.current = true;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(persist, savedIdRef.current ? 900 : 250);
+  }, [sigNow, running]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const makeAnalysis = () => createAnalysis({
     dataUrl: imageUrl, extra: instructions, chips, apiKey, modeId: mode,
     onUpdate, onDone, onError,
@@ -247,6 +325,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
     if (!apiKey) { setError({ msg: "محتاج تحط مفتاح Gemini الأول. دوس على أيقونة 🔑 فوق." }); onNeedKey(); return; }
     an.current?.cancel();
     clearTimeout(timer.current); timer.current = 0; buf.current = {};
+    clearTimeout(saveTimer.current); pendingSave.current = false; autoOK.current = false;
     prev.current = result;
     tracker.current = createTracker(mode, perfRef.current);
     setSnap(snapshot(tracker.current));
@@ -271,6 +350,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
 
   const stop = () => {
     an.current?.cancel();
+    autoOK.current = false;
     flush();
     setStatus((s) => {
       const n = { ...s };
@@ -285,10 +365,11 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   };
 
   const setField = useCallback((key, v) => setResult((r) => ({ ...(r || EMPTY_RESULT), [key]: v })), []);
-  const save = () => onSave({
-    title, imageUrl, instructions, chips,
-    result: Object.fromEntries(Object.entries(result || EMPTY_RESULT).map(([k, v]) => [k, v ?? ""])),
-  });
+  const removeQuestion = async () => {
+    gone.current = true; clearTimeout(saveTimer.current); pendingSave.current = false;
+    try { await savePromise.current; } catch (err) { /* nothing to wait for */ }
+    onDelete(savedIdRef.current);
+  };
 
   /* ── derived: the four monitor lamps ── */
   const has = (k) => !!result && result[k] !== null && result[k] !== undefined && result[k] !== "";
@@ -319,8 +400,8 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   return (
     <div className="page">
       <div className="page-head">
-        <h1>{initial ? "تعديل السؤال" : "سؤال جديد"}</h1>
-        {initial && <ConfirmButton onConfirm={() => onDelete(initial.id)} label="حذف السؤال" />}
+        <h1>{savedId ? "تعديل السؤال" : "سؤال جديد"}</h1>
+        {savedId && <ConfirmButton onConfirm={removeQuestion} label="حذف السؤال" />}
       </div>
 
       <div className="stack">
@@ -332,7 +413,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
               <img src={imageUrl} alt="صورة السؤال" />
               <div className="preview-actions">
                 <button onClick={() => fileRef.current?.click()} className="btn btn-ghost btn-sm"><Icon name="imagePlus" size={16} /> غيّر الصورة</button>
-                <button onClick={() => setImageUrl(null)} className="btn btn-danger btn-sm"><Icon name="x" size={16} /> شيل</button>
+                <button onClick={() => { setImageUrl(null); setImgRev((n) => n + 1); }} className="btn btn-danger btn-sm"><Icon name="x" size={16} /> شيل</button>
               </div>
             </div>
           ) : (
@@ -426,30 +507,9 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
                   onRetry={retry} defaultOpen={!initial} />
               );
             })}
-            <p className="note-end">ملحوظة: Regenerate بيستبدل أي تعديلات عملتها على النتيجة الحالية.</p>
           </div>
         )}
       </div>
-
-      {/* 5 · dock */}
-      {started && (
-        <div className="dock">
-          <div className="dock-in">
-            {running && snap ? (
-              <DockProgress snap={snap} onStop={stop} />
-            ) : (
-              <>
-                <button onClick={analyze} className="btn btn-ghost btn-regen" aria-label="Regenerate">
-                  <Icon name="refresh" size={18} /><span className="lbl">Regenerate</span>
-                </button>
-                <button onClick={save} className="btn btn-sun btn-save">
-                  <Icon name="save" size={20} /><span>حفظ السؤال</span>
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
