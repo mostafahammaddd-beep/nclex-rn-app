@@ -404,7 +404,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
         {savedId && <ConfirmButton onConfirm={removeQuestion} label="حذف السؤال" />}
       </div>
 
-      <div className="stack ed-grid" data-started={started}>
+      <div className="stack ed-grid">
         <aside className="ed-side">
         {/* 1 · the screenshot */}
         <div>
@@ -491,13 +491,6 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
         </aside>
 
         {/* 4 · results */}
-        {!started && (
-          <div className="results-empty" aria-hidden="true">
-            <span className="empty-ico"><Icon name="brain" size={34} /></span>
-            <b>التفصيص هيظهر هنا</b>
-            <p>ارفع الصورة من اللوحة الجانبية واضغط «حلّل السؤال»، والنتيجة بتتكتب قدامك على طول.</p>
-          </div>
-        )}
         {started && (
           <div ref={resultRef} className="results">
             {running && snap && <Monitor snap={snap} steps={steps} onStop={stop} />}
