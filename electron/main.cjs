@@ -38,7 +38,8 @@ function createWindow() {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (e, url) => {
-    if (!url.startsWith("file://")) { e.preventDefault(); if (/^https?:/i.test(url)) shell.openExternal(url); }
+    e.preventDefault();                      // also stops a dropped PDF/image from replacing the app window
+    if (/^https?:/i.test(url)) shell.openExternal(url);
   });
 
   // Alt+Left / Alt+Right = back / forward (the app's navigation uses browser history, like the Android back button)

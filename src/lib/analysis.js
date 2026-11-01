@@ -16,6 +16,7 @@ import { MODES } from "./config.js";
 import { buildOcrPrompt, buildWordsPrompt, buildSolvePrompt, buildLessonAPrompt, buildLessonBPrompt } from "./prompts.js";
 import { cleanOcr, cleanWords, cleanBrief, splitReason } from "./parse.js";
 import { getModelLists, runTask } from "./gemini.js";
+import { sourceParts, sourceNote } from "./docs.js";
 
 export const TASK_KEYS = {
   ocr: ["original_question_text"],
@@ -31,10 +32,11 @@ const SIMPLE_CFG = {
 const isAbort = (err) => !err || err.name === "AbortError";
 const secs = (ms) => Math.round(ms / 100) / 10;
 
-export function createAnalysis({ dataUrl, extra, chips, apiKey, modeId, onUpdate, onDone, onError }) {
+export function createAnalysis({ dataUrl, doc, extra, chips, apiKey, modeId, onUpdate, onDone, onError }) {
   const mode = MODES[modeId] || MODES.balanced;
   const lists = getModelLists(apiKey);
-  const img = { inlineData: { mimeType: "image/jpeg", data: dataUrl.split(",")[1] } };
+  const src = sourceParts(doc, dataUrl);       // the screenshot, the PDF or the text document
+  const note = sourceNote(doc, extra);         // "" for a plain screenshot
   const live = {};
 
   const fastFirst = [...lists.fast, ...lists.pro];
@@ -45,7 +47,7 @@ export function createAnalysis({ dataUrl, extra, chips, apiKey, modeId, onUpdate
     apiKey, task,
     models: cfg.tier === "pro" ? proFirst : fastFirst,
     system: prompt.system,
-    parts: [img, { text: prompt.user }],
+    parts: [...src, { text: note + prompt.user }],
     spec: { levels: cfg.levels, budget: cfg.budget },
     maxOut: cfg.maxOut, hedgeMs: cfg.hedgeMs, firstMs: cfg.firstMs, idleMs: cfg.idleMs,
     signal, onText,

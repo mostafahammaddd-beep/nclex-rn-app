@@ -6,7 +6,8 @@ import { RichText, QuestionView, WordList } from "../components/rich.jsx";
 import { CHIPS, MODES, SECTIONS, EMPTY_RESULT } from "../lib/config.js";
 import { createAnalysis, TASK_KEYS } from "../lib/analysis.js";
 import { createTracker, restartTask, snapshot, feed, settle, expectedMs, fmtRemaining } from "../lib/progress.js";
-import { fileToCompressedDataUrl } from "../lib/image.js";
+import { readSource, isSupported } from "../lib/docs.js";
+import ChatPanel from "../components/ChatPanel.jsx";
 import { warmConnection } from "../lib/gemini.js";
 import { store } from "../lib/storage.js";
 
@@ -101,6 +102,9 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
 export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete }) {
   const [title, setTitle] = useState(initial?.title || "");
   const [imageUrl, setImageUrl] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatEver, setChatEver] = useState(false);   // mounted after the first open → a streaming answer survives closing
+  const [doc, setDoc] = useState(null);          // PDF / text source (null = a plain screenshot)
   const [instructions, setInstructions] = useState(initial?.instructions || "");
   const [chips, setChips] = useState(initial?.chips || []);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -134,6 +138,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   modeRef.current = mode;
 
   const running = Object.values(status).some((s) => s === "run");
+  const canChat = !running && !!((result?.original_question_text || "").trim() || (result?.explanation || "").trim());
   const started = !!result;
 
   /* ── auto-save ──
@@ -153,7 +158,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   const savePromise = useRef(null);
   const latest = useRef(null);
   const sigNow = JSON.stringify([title, instructions, chips, result, imgRev]);
-  latest.current = { title, imageUrl, instructions, chips, result, imgRev, sig: sigNow, onSave };
+  latest.current = { title, imageUrl, doc, instructions, chips, result, imgRev, sig: sigNow, onSave };
 
   const persist = useCallback(() => {
     pendingSave.current = false;
@@ -166,7 +171,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
           const L = latest.current;
           if (gone.current || !L.result || L.sig === lastSig.current) break;
           const id = await L.onSave({
-            id: savedIdRef.current, title: L.title, imageUrl: L.imageUrl, imageChanged: L.imgRev !== savedImgRev.current,
+            id: savedIdRef.current, title: L.title, imageUrl: L.imageUrl, doc: L.doc, imageChanged: L.imgRev !== savedImgRev.current,
             instructions: L.instructions, chips: L.chips,
             result: Object.fromEntries(Object.entries(L.result).map(([k, v]) => [k, v ?? ""])),
           });
@@ -206,21 +211,24 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   useEffect(() => {
     if (!initial?.id) return;
     let alive = true;
-    store.get(`nclex:img:${initial.id}`).then((r) => { if (alive && r?.data) setImageUrl(r.data); });
+    store.get(`nclex:img:${initial.id}`).then((r) => { if (alive && r?.data) { setImageUrl(r.data); setDoc(r.doc || null); } });
     return () => { alive = false; };
   }, [initial?.id]);
 
   const pickMode = (m) => { setMode(m); store.set("nclex:mode", m); };
 
   const takeFile = useCallback(async (file) => {
-    if (!file || !file.type.startsWith("image/")) { setError({ msg: "الملف لازم يكون صورة." }); return; }
-    try { setImageUrl(await fileToCompressedDataUrl(file)); setImgRev((n) => n + 1); setError(null); warmConnection(apiKey); }
-    catch (e) { setError({ msg: e.message }); }
+    if (!file) return;
+    if (!isSupported(file)) { setError({ msg: "نوع الملف ده مش مدعوم. ارفع صورة أو ملف PDF أو ملف نصي (.txt)." }); return; }
+    try {
+      const src = await readSource(file);
+      setImageUrl(src.imageUrl); setDoc(src.doc); setImgRev((n) => n + 1); setError(null); warmConnection(apiKey);
+    } catch (e) { setError({ msg: e.message }); }
   }, [apiKey]);
 
   useEffect(() => {
     const onPaste = (e) => {
-      const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+      const item = [...(e.clipboardData?.items || [])].find((i) => i.kind === "file" && (i.type.startsWith("image/") || i.type === "application/pdf"));
       if (item) { e.preventDefault(); takeFile(item.getAsFile()); }
     };
     window.addEventListener("paste", onPaste);
@@ -316,12 +324,12 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   }, [sigNow, running]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const makeAnalysis = () => createAnalysis({
-    dataUrl: imageUrl, extra: instructions, chips, apiKey, modeId: mode,
+    dataUrl: imageUrl, doc, extra: instructions, chips, apiKey, modeId: mode,
     onUpdate, onDone, onError,
   });
 
   const analyze = () => {
-    if (!imageUrl) { setError({ msg: "ارفع صورة السؤال الأول." }); return; }
+    if (!imageUrl) { setError({ msg: "ارفع صورة السؤال أو ملف PDF الأول." }); return; }
     if (!apiKey) { setError({ msg: "محتاج تحط مفتاح Gemini الأول. دوس على أيقونة 🔑 فوق." }); onNeedKey(); return; }
     an.current?.cancel();
     clearTimeout(timer.current); timer.current = 0; buf.current = {};
@@ -408,14 +416,15 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
         <aside className="ed-side">
         {/* 1 · the screenshot */}
         <div>
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { takeFile(e.target.files?.[0]); e.target.value = ""; }} />
+          <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf,.txt,.md,text/plain" hidden onChange={(e) => { takeFile(e.target.files?.[0]); e.target.value = ""; }} />
           {imageUrl ? (
             <div className="card preview">
-              <img src={imageUrl} alt="صورة السؤال" />
+              <img src={imageUrl} alt={doc ? doc.name : "صورة السؤال"} />
               <div className="preview-actions">
-                <button onClick={() => fileRef.current?.click()} className="btn btn-ghost btn-sm"><Icon name="imagePlus" size={16} /> غيّر الصورة</button>
-                <button onClick={() => { setImageUrl(null); setImgRev((n) => n + 1); }} className="btn btn-danger btn-sm"><Icon name="x" size={16} /> شيل</button>
+                <button onClick={() => fileRef.current?.click()} className="btn btn-ghost btn-sm"><Icon name="imagePlus" size={16} /> {doc ? "غيّر الملف" : "غيّر الصورة"}</button>
+                <button onClick={() => { setImageUrl(null); setDoc(null); setImgRev((n) => n + 1); }} className="btn btn-danger btn-sm"><Icon name="x" size={16} /> شيل</button>
               </div>
+              {doc && <p className="doc-hint">الملف فيه أكتر من سؤال؟ افتح «عنوان وتعليمات إضافية» واكتب رقم السؤال أو الصفحة.</p>}
             </div>
           ) : (
             <button type="button" data-over={over} className="drop"
@@ -424,8 +433,8 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
               onDragLeave={() => setOver(false)}
               onDrop={(e) => { e.preventDefault(); setOver(false); takeFile(e.dataTransfer.files?.[0]); }}>
               <span className="drop-ico"><Icon name="imagePlus" size={28} /></span>
-              <b>ارفع سكرين شوت السؤال</b>
-              <span className="hint">اضغط عشان تختار الصورة، أو الصقها بـ Ctrl+V</span>
+              <b>ارفع السؤال: صورة أو PDF أو ملف نصي</b>
+              <span className="hint">اضغط عشان تختار الملف، أو اسحبه هنا، أو الصق الصورة بـ Ctrl+V</span>
             </button>
           )}
         </div>
@@ -513,6 +522,21 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
           </div>
         )}
       </div>
+
+      {canChat && (
+        <>
+          {!chatOpen && (
+            <button type="button" className="chat-fab" onClick={() => { setChatEver(true); setChatOpen(true); }} aria-label="دردش مع الـ AI عن السؤال">
+              <Icon name="chat" size={24} /><span>اسأل الـ AI</span>
+            </button>
+          )}
+          {chatEver && (
+            <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} apiKey={apiKey} onNeedKey={onNeedKey}
+              ctx={{ question: result?.original_question_text, explanation: result?.explanation, tricks: result?.tricks, imageUrl, doc }}
+              chipIds={chips} storeKey={savedId ? `nclex:chat:${savedId}` : null} />
+          )}
+        </>
+      )}
     </div>
   );
 }

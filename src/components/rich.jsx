@@ -2,6 +2,7 @@ import React, { memo, useMemo, useEffect } from "react";
 import Icon from "./Icon.jsx";
 import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
 import { speak, prefetch, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
+import { fixText } from "../lib/text.js";
 
 /* ───────── pronunciation button (American male voice, see lib/speech.js) ───────── */
 
@@ -62,7 +63,7 @@ export function cleanMath(s) {
 }
 
 export function Inline({ text }) {
-  const parts = cleanMath(text || "").split(/(\*\*[^*]+\*\*)/g);
+  const parts = cleanMath(fixText(text || "")).split(/(\*\*[^*]+\*\*)/g);
   return (
     <>
       {parts.map((p, i) =>
@@ -80,7 +81,7 @@ const dirOf = (s) => (hasArabic(s) ? "rtl" : "ltr");
 
 function parseBlocks(text) {
   const out = [];
-  (text || "").split("\n").map((l) => l.trim()).filter(Boolean).forEach((l) => {
+  fixText(text || "").split("\n").map((l) => l.trim()).filter(Boolean).forEach((l) => {
     let m;
     if ((m = l.match(/^#{1,3}\s+(.*)$/))) out.push({ t: "h", s: m[1] });
     else if ((m = l.match(/^[-•*]\s+(.*)$/))) {
@@ -129,7 +130,7 @@ export const RichText = memo(function RichText({ text }) {
 /* ───────── the question itself (always LTR English) ───────── */
 
 export const QuestionView = memo(function QuestionView({ text }) {
-  const lines = useMemo(() => (text || "").split("\n").map((l) => l.trim()).filter(Boolean), [text]);
+  const lines = useMemo(() => fixText(text || "").split("\n").map((l) => l.trim()).filter(Boolean), [text]);
   return (
     <div dir="ltr" className="qv">
       {lines.map((l, i) => {

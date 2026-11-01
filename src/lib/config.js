@@ -14,8 +14,8 @@ export const CHIPS = [
 /* cls = css class that sets the section accent (--acc / --acc-rgb / --acc-ink) in light + dark.
    wait = what the placeholder says while this section is still being written. */
 export const SECTIONS = [
-  { key: "original_question_text", title: "نص السؤال", sub: "اللي اتقرا من الصورة", icon: "fileText", rows: 6, cls: "sec-sky", ltr: true, step: "read",
-    wait: "بنقرا السؤال من الصورة…" },
+  { key: "original_question_text", title: "نص السؤال", sub: "اللي اتقرا من الصورة أو الملف", icon: "fileText", rows: 6, cls: "sec-sky", ltr: true, step: "read",
+    wait: "بنقرا السؤال من الصورة أو الملف…" },
   { key: "new_words", title: "كلمات جديدة", sub: "كل كلمة ممكن تكون صعبة على مستوى A2", icon: "library", rows: 8, cls: "sec-violet", step: "words",
     wait: "بنلمّ كل كلمة ممكن تكون غريبة عليك…" },
   { key: "explanation", title: "تفصيص السؤال", sub: "شرح من الصفر + الإنجليزي", icon: "brain", rows: 12, cls: "sec-teal", step: "explain",

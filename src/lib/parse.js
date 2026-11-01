@@ -1,3 +1,4 @@
+import { fixText } from "./text.js";
 /* ───────────── Text helpers & stream splitters ───────────── */
 
 export const hasArabic = (s) => /[؀-ۿ]/.test(s || "");
@@ -6,7 +7,7 @@ const BULLET = /^\s*(?:[-•*·]+|\d{1,2}[.)])\s+/;
 
 /* New-words text → clean lines (one entry per line) */
 export const wordLines = (text) =>
-  (text || "").split("\n").map((l) => l.replace(BULLET, "").trim()).filter(Boolean);
+  fixText(text || "").split("\n").map((l) => l.replace(BULLET, "").trim()).filter(Boolean);
 
 const SEP = /\s[—–]\s|\s\|\s/;
 
@@ -21,7 +22,7 @@ const stripFences = (t) => t.replace(/^\s*```[a-z]*\s*$/gim, "");
 
 /* OCR text: show everything as it streams (even the unfinished last line) */
 export function cleanOcr(raw) {
-  return stripFences(raw || "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  return fixText(stripFences(raw || "")).replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /* New words: while streaming only COMPLETE lines are shown (no flickering half-words). */
@@ -38,7 +39,7 @@ export function cleanWords(raw, final) {
     seen.add(k);
     return true;
   });
-  return lines.join("\n");
+  return fixText(lines.join("\n"));
 }
 
 /* SOLVE brief → text handed to the lesson writer. Without an ANSWER line it is not trustworthy, so it is dropped
@@ -79,7 +80,7 @@ export function splitReason(raw, final) {
   explanation = explanation.trim();
   if (tricks !== null) tricks = (final ? tricks : hidePartialMarker(tricks)).trim();
   else if (final) tricks = "";
-  return { explanation, tricks };
+  return { explanation: fixText(explanation), tricks: fixText(tricks) };
 }
 
 /* day helpers for streak / daily goal */

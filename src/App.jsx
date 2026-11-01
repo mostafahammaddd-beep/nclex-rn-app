@@ -121,7 +121,7 @@ export default function App({ boot }) {
   /* Auto-save, called by the editor (it never navigates away).
      `id` is empty only for the very first save of a new question; after that the editor keeps sending the same id,
      so every later save updates that one question instead of creating a copy. */
-  const saveQuestion = async ({ id: knownId, title, imageUrl, imageChanged, instructions, chips, result }) => {
+  const saveQuestion = async ({ id: knownId, title, imageUrl, doc, imageChanged, instructions, chips, result }) => {
     const id = knownId || uid();
     const existing = qRef.current.find((q) => q.id === id) || null;
     const now = Date.now();
@@ -129,7 +129,7 @@ export default function App({ boot }) {
     if (!existing || imageChanged) {
       if (imageUrl) {
         try { thumb = await resizeDataUrl(imageUrl, 360, 0.6); } catch (e) { /* keep old thumb */ }
-        const ok = await store.set(`nclex:img:${id}`, { data: imageUrl });
+        const ok = await store.set(`nclex:img:${id}`, { data: imageUrl, doc: doc || null });
         if (!ok) say("الصورة كبيرة والتخزين ممتلئ، اتحفظ النص بس");
       } else {
         await store.del(`nclex:img:${id}`);
@@ -168,7 +168,7 @@ export default function App({ boot }) {
     const nextW = wRef.current.filter((w) => w.qid !== id);
     qRef.current = nextQ; wRef.current = nextW;
     setQuestions(nextQ); setWords(nextW);
-    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`)]);
+    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`), store.del(`nclex:chat:${id}`)]);
     say("اتحذف السؤال");
     back();
   };
