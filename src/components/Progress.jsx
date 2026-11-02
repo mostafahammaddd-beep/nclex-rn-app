@@ -22,7 +22,7 @@ function Steps({ steps }) {
 
 /* Same language as the result cards: white card, teal side bar, soft chips, teal → sky gradient. */
 export function Monitor({ snap, steps, onStop }) {
-  const eta = snap.almost ? "لحظات وهنخلّص…" : `فاضل ${fmtRemaining(snap.remainingSec)}`;
+  const eta = snap.almost ? "لحظات وهنخلّص…" : "بيذاكر سؤالك بعمق… الوقت بيختلف حسب الضغط";   // no seconds estimate: it was always wrong
   return (
     <section className="prog sec-teal" aria-live="polite" aria-label="تقدّم التحليل">
       <div className="prog-head">

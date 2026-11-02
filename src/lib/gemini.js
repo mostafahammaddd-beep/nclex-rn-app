@@ -18,6 +18,7 @@
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
+import { trackRequest, noteQuota } from "./usage.js";
 export const ENV_KEY = ENV.VITE_GEMINI_API_KEY || "";
 export const API_BASE = ENV.VITE_API_BASE || "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -51,6 +52,7 @@ function classify(status, message) {
     /api key not valid|api_key_invalid|api key expired|invalid api key|api key not found|api key is missing/.test(m) ||
     (status === 403 && /api key|api_key|referer|ip address|has not been used|is disabled/.test(m))
   );
+  if (status === 429) noteQuota(message);
   err.dead = status === 404 || (status === 429 && /limit:\s*0/.test(m)) || (status === 403 && !err.fatal);
   return err;
 }
@@ -350,6 +352,7 @@ async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, 
     const body = { contents: [{ role: "user", parts }], generationConfig: genConfig(model, rungs[idx], maxOut, task) };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     try {
+      trackRequest(model);                                       // every request counts against the daily quota
       const out = await streamOrNative({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs });
       if (!out.text.trim()) {
         throw Object.assign(new Error(out.block ? "السؤال اتحجب من فلتر الأمان بتاع Google. جرّب صورة تانية." : "الذكاء الاصطناعي رجّع رد فاضي. جرّب تاني."),
@@ -454,4 +457,64 @@ export function runTask({ apiKey, models, task, system, parts, spec, maxOut, hed
     apiKey, models, hedgeMs, signal, onText,
     run: (model, sig, emit, alive) => attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal: sig, onText: emit, onAlive: alive, firstMs, idleMs }),
   });
+}
+
+
+/* ───────────── image generation (Nano Banana family) ─────────────
+   The image models are NOT on Google's free tier, so the first answer for a free key is a clear message.
+   Model ids change often → the list is read from the API for THIS key (cached 12 h); a static list is the fallback. */
+
+const IMG_PREFERRED = ["gemini-3.1-flash-image", "gemini-nano-banana-2.1", "gemini-3.1-flash-image-preview", "gemini-3-pro-image", "gemini-3-pro-image-preview", "gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"];
+const LS_IMG = "nclex:imgmodels:v1";
+
+async function imageModels(apiKey) {
+  try {
+    const c = JSON.parse(window.localStorage.getItem(LS_IMG));
+    if (c && c.key === apiKey.slice(-6) && Date.now() - c.at < 12 * 3600e3 && c.list.length) return c.list;
+  } catch (e) { /* ignore */ }
+  let names = [];
+  try {
+    const r = await rawRequest("GET", `${API_BASE}?pageSize=200&key=${encodeURIComponent(apiKey)}`, undefined, 20000);
+    names = ((r.json && r.json.models) || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent") && /image|banana/i.test(m.name) && !/imagen/i.test(m.name))
+      .map((m) => m.name.replace(/^models\//, ""));
+  } catch (e) { /* offline list → fall back */ }
+  const rank = (n) => { const i = IMG_PREFERRED.indexOf(n); return i < 0 ? 99 : i; };
+  const list = names.length ? [...names].sort((a, b) => rank(a) - rank(b)) : IMG_PREFERRED;
+  try { window.localStorage.setItem(LS_IMG, JSON.stringify({ key: apiKey.slice(-6), at: Date.now(), list })); } catch (e) { /* ignore */ }
+  return list;
+}
+
+export async function generateImage({ apiKey, prompt, parts = [], signal }) {
+  const models = await imageModels(apiKey);
+  let last = null;
+  for (const model of models) {
+    if (signal && signal.aborted) throw abortError();
+    trackRequest(model);
+    const url = `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const body = { contents: [{ role: "user", parts: [...parts, { text: prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } };
+    let r;
+    try { r = await rawRequest("POST", url, body, 170000); }
+    catch (e) { last = e; continue; }
+    if (signal && signal.aborted) throw abortError();
+    if (r.status === 200) {
+      const ps = (((r.json.candidates || [])[0] || {}).content || {}).parts || [];
+      const img = ps.find((p) => p.inlineData && /^image\//.test(p.inlineData.mimeType || "") && !p.thought);
+      const text = ps.filter((p) => typeof p.text === "string" && !p.thought).map((p) => p.text).join("").trim();
+      if (img) {
+        try { window.localStorage.setItem(LS_IMG, JSON.stringify({ key: apiKey.slice(-6), at: Date.now(), list: [model, ...models.filter((m) => m !== model)] })); } catch (e) { /* ignore */ }
+        return { mime: img.inlineData.mimeType, data: img.inlineData.data, text, model };
+      }
+      last = Object.assign(new Error("الموديل ما رسمش صورة (ممكن الطلب اتحجب لأسباب أمان). جرّب توصف الصورة بشكل تاني."), { detail: `${model} · no image` });
+      continue;
+    }
+    const msg = (r.json && r.json.error && r.json.error.message) || "";
+    const err = classify(r.status, msg);
+    if (r.status === 404 || /not found|not supported|unsupported|is not available/i.test(msg)) { last = err; continue; }
+    if (r.status === 429 || r.status === 403 || /billing|paid|free.?tier/i.test(msg)) {
+      throw Object.assign(new Error("إنشاء الصور في Gemini مش متاح في الباقة المجانية. فعّل الدفع (Billing) من Google AI Studio لو عايزه."), { detail: err.detail, billing: true });
+    }
+    throw err;
+  }
+  throw Object.assign(last || new Error("مفيش موديل رسم صور متاح مع المفتاح ده."), { billing: true });
 }

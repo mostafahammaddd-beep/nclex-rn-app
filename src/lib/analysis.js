@@ -13,7 +13,8 @@
    Each task streams into the UI as it is written and can be retried or stopped on its own. */
 
 import { MODES } from "./config.js";
-import { buildOcrPrompt, buildWordsPrompt, buildSolvePrompt, buildLessonAPrompt, buildLessonBPrompt } from "./prompts.js";
+import { buildOcrPrompt, buildWordsPrompt, buildSolvePrompt, buildLessonAPrompt, buildLessonBPrompt, buildStudySummaryPrompt, buildStudyAPrompt, buildStudyBPrompt } from "./prompts.js";
+import { fixText, looksGlitched, ARABIC_RULE } from "./text.js";
 import { cleanOcr, cleanWords, cleanBrief, splitReason } from "./parse.js";
 import { getModelLists, runTask } from "./gemini.js";
 import { sourceParts, sourceNote } from "./docs.js";
@@ -32,31 +33,45 @@ const SIMPLE_CFG = {
 const isAbort = (err) => !err || err.name === "AbortError";
 const secs = (ms) => Math.round(ms / 100) / 10;
 
-export function createAnalysis({ dataUrl, doc, extra, chips, apiKey, modeId, onUpdate, onDone, onError }) {
+export function createAnalysis({ kind = "question", history, dataUrl, doc, extra, chips, apiKey, modeId, onUpdate, onDone, onError }) {
+  const L = kind === "lesson";                 // study material (books, notes, slides, pasted text) instead of one exam question
   const mode = MODES[modeId] || MODES.balanced;
+  const wordsCap = L ? { a: Math.round(mode.write.words.a * 1.7), b: Math.round(mode.write.words.b * 1.4) } : mode.write.words;
   const lists = getModelLists(apiKey);
   const src = sourceParts(doc, dataUrl);       // the screenshot, the PDF or the text document
-  const note = sourceNote(doc, extra);         // "" for a plain screenshot
+  const note = sourceNote(doc, extra, kind);   // "" for a plain screenshot
   const live = {};
 
   const fastFirst = [...lists.fast, ...lists.pro];
   const proFirst = [...lists.pro, ...lists.fast];
 
   /* one model call (hedged across the tier's models) */
-  const stage = (task, cfg, prompt, signal, onText) => runTask({
+  const stageOnce = (task, cfg, prompt, signal, onText) => runTask({
     apiKey, task,
     models: cfg.tier === "pro" ? proFirst : fastFirst,
-    system: prompt.system,
+    system: prompt.system + (L || task !== "ocr" ? ARABIC_RULE : ""),   // the OCR transcript must stay exactly as written
     parts: [...src, { text: note + prompt.user }],
     spec: { levels: cfg.levels, budget: cfg.budget },
     maxOut: cfg.maxOut, hedgeMs: cfg.hedgeMs, firstMs: cfg.firstMs, idleMs: cfg.idleMs,
     signal, onText,
   });
 
+  /* the model now and then drops stray letters of another script, or Latin fragments, inside Arabic words.
+     text.js removes them from the screen; when we see it we also ask for ONE clean rewrite (rare, so almost free). */
+  const STRICT = "\n\nQUALITY ALERT: your previous attempt put stray letters of another script, or Latin fragments, inside Arabic words. Rewrite the whole answer carefully now: every Arabic word spelled completely with standard Arabic letters only; every English word whole and separate, with spaces around it.";
+  const stage = async (task, cfg, prompt, signal, onText) => {
+    const res = await stageOnce(task, cfg, prompt, signal, onText);
+    if (signal.aborted || !(L || task !== "ocr") || /^solve/.test(task) || !looksGlitched(res.text)) return res;
+    try { return await stageOnce(task, cfg, { ...prompt, system: prompt.system + STRICT }, signal, onText); }
+    catch (e) { if (isAbort(e) || signal.aborted) throw e; return res; }
+  };
+
   /* ── ocr + words: one stage each ── */
   const SIMPLE = {
-    ocr: { prompt: () => buildOcrPrompt(), apply: (full) => ({ original_question_text: cleanOcr(full) }) },
-    words: { prompt: () => buildWordsPrompt(chips), apply: (full, final) => ({ new_words: cleanWords(full, final) }) },
+    ocr: L
+      ? { prompt: () => buildStudySummaryPrompt(chips, extra), apply: (full) => ({ original_question_text: fixText(String(full || "").replace(/^```[a-z]*\n?|\n?```$/gim, "").trim()) }) }
+      : { prompt: () => buildOcrPrompt(), apply: (full) => ({ original_question_text: cleanOcr(full) }) },
+    words: { prompt: () => buildWordsPrompt(chips, kind), apply: (full, final) => ({ new_words: cleanWords(full, final) }) },
   };
 
   function runSimple(name) {
@@ -67,7 +82,7 @@ export function createAnalysis({ dataUrl, doc, extra, chips, apiKey, modeId, onU
 
     const t0 = performance.now();
     let lastFull = "", ttft = null;
-    stage(name, SIMPLE_CFG[name], def.prompt(), ctrl.signal, (full, model) => {
+    stage(name, L && name === "words" ? { ...SIMPLE_CFG.words, maxOut: 14000 } : SIMPLE_CFG[name], def.prompt(), ctrl.signal, (full, model) => {
       if (ctrl.signal.aborted) return;
       if (ttft === null) ttft = performance.now() - t0;
       lastFull = full;
@@ -127,8 +142,9 @@ export function createAnalysis({ dataUrl, doc, extra, chips, apiKey, modeId, onU
       });
     };
 
-    /* the careful, silent stage */
-    stage(`solve:${mode.id}`, mode.solve, buildSolvePrompt(), sig, () => {})
+    /* the careful, silent stage (study material has no single answer to verify → part B starts at once) */
+    if (L) { S.t.solve = 0; startB(null); }
+    else stage(`solve:${mode.id}`, mode.solve, buildSolvePrompt(), sig, () => {})
       .then(({ text }) => { S.t.solve = since(); startB(cleanBrief(text) || null); })
       .catch((err) => {
         if (isAbort(err) || sig.aborted) return;
@@ -138,7 +154,7 @@ export function createAnalysis({ dataUrl, doc, extra, chips, apiKey, modeId, onU
       });
 
     /* part A: no answer needed → starts together with `solve` */
-    stage(`lessonA:${mode.id}`, mode.write, buildLessonAPrompt({ extra, chips, words: mode.write.words.a }), sig, (full, model) => {
+    stage(`lessonA:${mode.id}`, mode.writeA || mode.write, L ? buildStudyAPrompt({ history, extra, chips, words: wordsCap.a }) : buildLessonAPrompt({ history, extra, chips, words: wordsCap.a }), sig, (full, model) => {
       S.a = full; S.aModel = model; emit(false);
     }).then(({ text, model }) => {
       S.a = text; S.aModel = model; S.aDone = true; S.t.a = since();
@@ -152,11 +168,11 @@ export function createAnalysis({ dataUrl, doc, extra, chips, apiKey, modeId, onU
     /* part B: steps · options · answer · memo · tricks */
     function startB(brief) {
       if (over || sig.aborted) return;
-      const cfg = brief
+      const cfg = brief || L
         ? mode.write
         : { ...mode.write, tier: mode.solve.tier, levels: mode.solve.levels, budget: mode.solve.budget,
             maxOut: mode.write.maxOut + mode.solve.maxOut, hedgeMs: mode.solve.hedgeMs, idleMs: mode.solve.idleMs, firstMs: mode.solve.firstMs };
-      stage(`${brief ? "lessonB" : "lessonBx"}:${mode.id}`, cfg, buildLessonBPrompt({ brief, extra, chips, words: mode.write.words.b }), sig, (full, model) => {
+      stage(`${brief ? "lessonB" : "lessonBx"}:${mode.id}`, cfg, L ? buildStudyBPrompt({ history, extra, chips, words: wordsCap.b }) : buildLessonBPrompt({ history, brief, extra, chips, words: wordsCap.b }), sig, (full, model) => {
         S.b = full; S.bModel = model; emit(false);
       }).then(({ text, model }) => {
         S.b = text; S.bModel = model; S.bDone = true;

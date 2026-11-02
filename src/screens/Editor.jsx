@@ -3,11 +3,12 @@ import Icon from "../components/Icon.jsx";
 import { AutoTextArea, ConfirmButton } from "../components/ui.jsx";
 import { Monitor } from "../components/Progress.jsx";
 import { RichText, QuestionView, WordList } from "../components/rich.jsx";
-import { CHIPS, MODES, SECTIONS, EMPTY_RESULT } from "../lib/config.js";
+import { CHIPS, MODES, sectionsFor, EMPTY_RESULT } from "../lib/config.js";
 import { createAnalysis, TASK_KEYS } from "../lib/analysis.js";
 import { createTracker, restartTask, snapshot, feed, settle, expectedMs, fmtRemaining } from "../lib/progress.js";
-import { readSource, isSupported } from "../lib/docs.js";
+import { readFiles, textItem, makeSource, itemsFromSaved, totalBytes, MAX_TOTAL } from "../lib/docs.js";
 import ChatPanel from "../components/ChatPanel.jsx";
+import SourceBox from "../components/SourceBox.jsx";
 import { warmConnection } from "../lib/gemini.js";
 import { store } from "../lib/storage.js";
 
@@ -80,7 +81,7 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
           !running && !error && <button onClick={() => setEditing(true)} className="btn btn-ghost" style={{ width: "100%" }}>فاضي. دوس هنا واكتب بنفسك</button>
         ) : key === "new_words" ? (
           <WordList text={value} warm={!running} />
-        ) : key === "original_question_text" ? (
+        ) : key === "original_question_text" && !section.rich ? (
           <QuestionView text={value} />
         ) : (
           <RichText text={value} />
@@ -99,7 +100,11 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
 
 /* ───────── editor ───────── */
 
-export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete }) {
+export default function Editor({ initial, history, kind: kindProp, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete }) {
+  const kind = initial?.kind || kindProp || "question";   // "question" (exam question) | "lesson" (study material → explanation)
+  const isLesson = kind === "lesson";
+  const sections = sectionsFor(kind);
+  const [items, setItems] = useState([]);                 // everything the student gave: pictures, files, typed text
   const [title, setTitle] = useState(initial?.title || "");
   const [imageUrl, setImageUrl] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -171,7 +176,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
           const L = latest.current;
           if (gone.current || !L.result || L.sig === lastSig.current) break;
           const id = await L.onSave({
-            id: savedIdRef.current, title: L.title, imageUrl: L.imageUrl, doc: L.doc, imageChanged: L.imgRev !== savedImgRev.current,
+            id: savedIdRef.current, kind, title: L.title, imageUrl: L.imageUrl, doc: L.doc, imageChanged: L.imgRev !== savedImgRev.current,
             instructions: L.instructions, chips: L.chips,
             result: Object.fromEntries(Object.entries(L.result).map(([k, v]) => [k, v ?? ""])),
           });
@@ -211,29 +216,50 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   useEffect(() => {
     if (!initial?.id) return;
     let alive = true;
-    store.get(`nclex:img:${initial.id}`).then((r) => { if (alive && r?.data) { setImageUrl(r.data); setDoc(r.doc || null); } });
+    store.get(`nclex:img:${initial.id}`).then((r) => { if (alive && r?.data) { setImageUrl(r.data); setDoc(r.doc || null); setItems(itemsFromSaved(r.data, r.doc)); } });
     return () => { alive = false; };
   }, [initial?.id]);
 
   const pickMode = (m) => { setMode(m); store.set("nclex:mode", m); };
 
-  const takeFile = useCallback(async (file) => {
-    if (!file) return;
-    if (!isSupported(file)) { setError({ msg: "نوع الملف ده مش مدعوم. ارفع صورة أو ملف PDF أو ملف نصي (.txt)." }); return; }
-    try {
-      const src = await readSource(file);
-      setImageUrl(src.imageUrl); setDoc(src.doc); setImgRev((n) => n + 1); setError(null); warmConnection(apiKey);
-    } catch (e) { setError({ msg: e.message }); }
-  }, [apiKey]);
+  /* ── the source: pictures / files / typed text ── */
+  const itemsRef = useRef([]);
+  itemsRef.current = items;
+  const applyItems = useCallback((next) => {
+    const src = makeSource(next);
+    setItems(next); setImageUrl(src.imageUrl); setDoc(src.doc); setImgRev((n) => n + 1);
+  }, []);
+  const addFiles = useCallback(async (files) => {
+    const list = [...(files || [])];
+    if (!list.length) return;
+    const cur = itemsRef.current;
+    const { items: next, errors } = await readFiles(list, cur);
+    if (next.length !== cur.length) { applyItems(next); warmConnection(apiKey); }
+    setError(errors.length ? { msg: errors.slice(0, 3).join("\n") } : null);
+  }, [apiKey, applyItems]);
+  const addText = useCallback((text) => {
+    const next = [...itemsRef.current, textItem(text, isLesson ? "نص الشرح" : "نص السؤال")];
+    if (totalBytes(next) > MAX_TOTAL) { setError({ msg: "الحجم الكلي كبير. شيل ملف أو اقصّ النص." }); return; }
+    applyItems(next); setError(null); warmConnection(apiKey);
+  }, [apiKey, applyItems, isLesson]);
+  const removeItem = useCallback((id) => applyItems(itemsRef.current.filter((i) => i.id !== id)), [applyItems]);
+  const clearItems = useCallback(() => applyItems([]), [applyItems]);
 
   useEffect(() => {
     const onPaste = (e) => {
-      const item = [...(e.clipboardData?.items || [])].find((i) => i.kind === "file" && (i.type.startsWith("image/") || i.type === "application/pdf"));
-      if (item) { e.preventDefault(); takeFile(item.getAsFile()); }
+      const cd = e.clipboardData;
+      if (!cd) return;
+      if (document.activeElement && document.activeElement.closest && document.activeElement.closest(".chat")) return;   // the chat handles its own pastes
+      const files = [...(cd.files || [])];
+      if (files.length) { e.preventDefault(); addFiles(files); return; }
+      const t = cd.getData("text/plain");
+      const el = document.activeElement;
+      const editable = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      if (!editable && t && t.trim().length >= 20) { e.preventDefault(); addText(t); }   // Ctrl+V anywhere = paste the text as the source
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [takeFile]);
+  }, [addFiles, addText]);
 
   const toggleChip = (c) =>
     setChips((cur) => (cur.includes(c.id) ? cur.filter((x) => x !== c.id) : [...cur.filter((x) => x !== c.excludes), c.id]));
@@ -324,12 +350,12 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   }, [sigNow, running]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const makeAnalysis = () => createAnalysis({
-    dataUrl: imageUrl, doc, extra: instructions, chips, apiKey, modeId: mode,
+    kind, history, dataUrl: imageUrl, doc, extra: instructions, chips, apiKey, modeId: mode,
     onUpdate, onDone, onError,
   });
 
   const analyze = () => {
-    if (!imageUrl) { setError({ msg: "ارفع صورة السؤال أو ملف PDF الأول." }); return; }
+    if (!items.length) { setError({ msg: isLesson ? "ارفع المادة أو الصق نصها الأول." : "ارفع السؤال (صورة أو ملف) أو اكتب نصه الأول." }); return; }
     if (!apiKey) { setError({ msg: "محتاج تحط مفتاح Gemini الأول. دوس على أيقونة 🔑 فوق." }); onNeedKey(); return; }
     an.current?.cancel();
     clearTimeout(timer.current); timer.current = 0; buf.current = {};
@@ -389,10 +415,10 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
     return "wait";
   };
   const steps = [
-    { id: "read", label: "قراءة السؤال", s: lamp("ocr", has("original_question_text")) },
+    { id: "read", label: isLesson ? "قراءة المادة" : "قراءة السؤال", s: lamp("ocr", has("original_question_text")) },
     { id: "words", label: "الكلمات", s: lamp("words", has("new_words")) },
-    { id: "explain", label: "التفصيص", s: status.reason === "run" && result?.tricks != null ? "done" : lamp("reason", has("explanation")) },
-    { id: "tricks", label: "التريكات", s: lamp("reason", result?.tricks != null && result.tricks !== "") },
+    { id: "explain", label: isLesson ? "الشرح" : "التفصيص", s: status.reason === "run" && result?.tricks != null ? "done" : lamp("reason", has("explanation")) },
+    { id: "tricks", label: isLesson ? "نقاط الحفظ" : "التريكات", s: lamp("reason", result?.tricks != null && result.tricks !== "") },
   ];
 
   const usedModels = [...new Set(Object.values(models))].join(" + ");
@@ -401,43 +427,21 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
   const timingLine = [
     timing.ocr && `قراءة ${sec1(timing.ocr.ms)}`,
     timing.words && `كلمات ${sec1(timing.words.ms)}`,
-    timing.reason?.stages && `حلّ ${timing.reason.stages.solve}ث · أساس ${timing.reason.stages.a}ث · تفصيص ${timing.reason.stages.b}ث`,
+    !isLesson && timing.reason?.stages && `حلّ ${timing.reason.stages.solve}ث · أساس ${timing.reason.stages.a}ث · تفصيص ${timing.reason.stages.b}ث`,
   ].filter(Boolean).join(" · ");
   const errCount = Object.values(status).filter((s) => s === "error").length;
 
   return (
     <div className="page">
       <div className="page-head">
-        <h1>{savedId ? "تعديل السؤال" : "سؤال جديد"}</h1>
-        {savedId && <ConfirmButton onConfirm={removeQuestion} label="حذف السؤال" />}
+        <h1>{savedId ? (isLesson ? "تعديل الشرح" : "تعديل السؤال") : (isLesson ? "شرح جديد" : "سؤال جديد")}</h1>
+        {savedId && <ConfirmButton onConfirm={removeQuestion} label={isLesson ? "حذف الشرح" : "حذف السؤال"} />}
       </div>
 
       <div className="stack ed-grid">
         <aside className="ed-side">
-        {/* 1 · the screenshot */}
-        <div>
-          <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf,.txt,.md,text/plain" hidden onChange={(e) => { takeFile(e.target.files?.[0]); e.target.value = ""; }} />
-          {imageUrl ? (
-            <div className="card preview">
-              <img src={imageUrl} alt={doc ? doc.name : "صورة السؤال"} />
-              <div className="preview-actions">
-                <button onClick={() => fileRef.current?.click()} className="btn btn-ghost btn-sm"><Icon name="imagePlus" size={16} /> {doc ? "غيّر الملف" : "غيّر الصورة"}</button>
-                <button onClick={() => { setImageUrl(null); setDoc(null); setImgRev((n) => n + 1); }} className="btn btn-danger btn-sm"><Icon name="x" size={16} /> شيل</button>
-              </div>
-              {doc && <p className="doc-hint">الملف فيه أكتر من سؤال؟ افتح «عنوان وتعليمات إضافية» واكتب رقم السؤال أو الصفحة.</p>}
-            </div>
-          ) : (
-            <button type="button" data-over={over} className="drop"
-              onClick={() => fileRef.current?.click()}
-              onDragOver={(e) => { e.preventDefault(); setOver(true); }}
-              onDragLeave={() => setOver(false)}
-              onDrop={(e) => { e.preventDefault(); setOver(false); takeFile(e.dataTransfer.files?.[0]); }}>
-              <span className="drop-ico"><Icon name="imagePlus" size={28} /></span>
-              <b>ارفع السؤال: صورة أو PDF أو ملف نصي</b>
-              <span className="hint">اضغط عشان تختار الملف، أو اسحبه هنا، أو الصق الصورة بـ Ctrl+V</span>
-            </button>
-          )}
-        </div>
+        {/* 1 · the source: any files and/or typed text */}
+        <SourceBox kind={kind} items={items} imageUrl={imageUrl} onFiles={addFiles} onText={addText} onRemove={removeItem} onClear={clearItems} />
 
         {/* 2 · mode */}
         <div>
@@ -447,8 +451,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
               <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} data-on={mode === m.id}
                 onClick={() => pickMode(m.id)} className="mode">
                 <b>{m.label}</b>
-                <small>{m.sub}</small>
-                <span className="eta">{fmtRemaining(Math.round(expectedMs(perf, "reason", m.id) / 1000))}</span>
+                {m.sub ? <small>{m.sub}</small> : null}
               </button>
             ))}
           </div>
@@ -472,6 +475,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
                 {CHIPS.map((c) => (
                   <button key={c.id} type="button" aria-pressed={chips.includes(c.id)} data-on={chips.includes(c.id)}
                     onClick={() => toggleChip(c)} className="chip">
+                    {c.icon && <Icon name={c.icon} size={15} />}
                     {c.label}
                     {chips.includes(c.id) && <Icon name="check" size={14} />}
                   </button>
@@ -482,8 +486,8 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
         </div>
 
         {!started && (
-          <button onClick={analyze} disabled={!imageUrl} className="btn btn-teal btn-go">
-            <Icon name="sparkles" size={24} /> حلّل السؤال
+          <button onClick={analyze} disabled={!items.length} className="btn btn-teal btn-go">
+            <Icon name="sparkles" size={24} /> {isLesson ? "اشرحلي المادة" : "حلّل السؤال"}
           </button>
         )}
 
@@ -511,7 +515,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
                 {timingLine && <small style={{ width: "100%", marginInlineStart: 0, direction: "rtl", textAlign: "start", opacity: .85 }}>⏱ {timingLine}</small>}
               </div>
             )}
-            {SECTIONS.map((s) => {
+            {sections.map((s) => {
               const task = TASK_OF[s.key];
               return (
                 <ResultSection key={s.key} section={s} value={result[s.key]} onChange={setField}
@@ -532,7 +536,7 @@ export default function Editor({ initial, boot, apiKey, perf, onLearn, onNeedKey
           )}
           {chatEver && (
             <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} apiKey={apiKey} onNeedKey={onNeedKey}
-              ctx={{ question: result?.original_question_text, explanation: result?.explanation, tricks: result?.tricks, imageUrl, doc }}
+              ctx={{ kind, question: result?.original_question_text, explanation: result?.explanation, tricks: result?.tricks, imageUrl, doc }}
               chipIds={chips} storeKey={savedId ? `nclex:chat:${savedId}` : null} />
           )}
         </>

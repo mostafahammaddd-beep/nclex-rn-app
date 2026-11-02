@@ -19,7 +19,7 @@ function greeting() {
 
 const R = 36, C = 2 * Math.PI * R;
 
-export default function Home({ questions, words, goal, onGoal, onAdd, onWords, onOpen }) {
+export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesson, onWords, onOpen }) {
   const sorted = useMemo(() => [...questions].sort((a, b) => b.updatedAt - a.updatedAt), [questions]);
   const wordCount = useMemo(() => words.reduce((n, w) => n + wordLines(w.text).length, 0), [words]);
   const stats = useMemo(() => studyStats(questions, goal), [questions, goal]);
@@ -87,9 +87,16 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onWords, o
         <button onClick={onAdd} className="cta cta-main">
           <span>
             <b>أضف سؤالاً</b>
-            <span className="sub">صوّر السؤال وسيبها على الذكاء الاصطناعي</span>
+            <span className="sub">صوّر السؤال أو ارفع أي ملف أو الصق نصه، وسيبها على الذكاء الاصطناعي</span>
           </span>
           <span className="cta-ico"><Icon name="plus" size={28} stroke={3} /></span>
+        </button>
+        <button onClick={onAddLesson} className="cta cta-lesson">
+          <span>
+            <b>أضف شرحاً</b>
+            <span className="sub">ارفع كتاب أو ملفات أو صور أو الصق نص، ويشرحه لك من الصفر</span>
+          </span>
+          <span className="cta-ico"><Icon name="bookOpen" size={26} /></span>
         </button>
         <button onClick={onWords} className="cta cta-alt">
           <span>
@@ -117,7 +124,7 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onWords, o
       </div>
 
       <div className="home-main">
-      <h2 className="h-sec">أسئلتك المحفوظة <span>{sorted.length}</span></h2>
+      <h2 className="h-sec">أسئلتك وشروحاتك المحفوظة <span>{sorted.length}</span></h2>
 
       {sorted.length === 0 ? (
         <div className="card empty">
@@ -137,8 +144,9 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onWords, o
                 </span>
                 <span className="qbody">
                   <h3>{q.title}</h3>
-                  <span className="snip" dir="auto">{q.original_question_text || "—"}</span>
+                  <span className="snip" dir="auto">{(q.original_question_text || "—").replace(/[#*>`]/g, "").replace(/\s+/g, " ")}</span>
                   <span className="qfoot">
+                    {q.kind === "lesson" && <span className="pill pill-lesson" style={{ padding: "1px 10px" }}>شرح 📖</span>}
                     <span className="pill pill-violet" style={{ padding: "1px 10px" }}>{n} كلمة</span>
                     <span>{fmtDate(q.updatedAt)}</span>
                   </span>

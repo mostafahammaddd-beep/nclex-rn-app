@@ -3,10 +3,11 @@ import Icon from "./Icon.jsx";
 import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
 import { speak, prefetch, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
 import { fixText } from "../lib/text.js";
+import { layout } from "../lib/emphasis.js";
 
 /* ───────── pronunciation button (American male voice, see lib/speech.js) ───────── */
 
-function SpeakBtn({ text, label = "اسمع النطق", ahead }) {
+export function SpeakBtn({ text, label = "اسمع النطق", ahead }) {
   const st = useSpeechState(text);
   const sp = useSpeed();
   return (
@@ -26,24 +27,6 @@ function SpeakBtn({ text, label = "اسمع النطق", ahead }) {
 
 /* ───────── inline: **bold** + Latin runs isolated as LTR so Arabic/English mix correctly ───────── */
 
-const W0 = "[A-Za-z0-9+\\-<>=≥≤±/.%'’&]";            // first char of a token inside a run
-const WN = "[A-Za-z0-9'’\\-/.%+&,;:!?<>=≥≤±]*";      // the rest of a token (keeps its punctuation)
-const PAR = "\\([A-Za-z0-9 ,.'’\\-/%+&<>=≥≤±]*\\)";
-const LATIN_RUN = new RegExp(`(?:[A-H]\\)[ ]+)?[A-Za-z0-9]${WN}(?:[ ]+(?:${W0}${WN}|${PAR}))*(?:[ ]*${PAR})?`, "g");
-
-function latinWrap(t, key) {
-  const res = [];
-  let last = 0, i = 0;
-  for (const m of t.matchAll(LATIN_RUN)) {
-    if (m.index > last) res.push(t.slice(last, m.index));
-    res.push(<bdi key={`${key}-${i++}`} dir="ltr" className="en">{m[0]}</bdi>);
-    last = m.index + m[0].length;
-  }
-  if (last < t.length) res.push(t.slice(last));
-  return res;
-}
-
-
 /* ───────── strip LaTeX / markup leftovers the model sometimes emits ($K^+$, \\rightarrow …) ───────── */
 const SUP = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","−":"⁻","n":"ⁿ" };
 const SUB = { "0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","+":"₊","-":"₋" };
@@ -62,15 +45,21 @@ export function cleanMath(s) {
     .replace(/[`$]/g, "");
 }
 
+/* a piece of text with its emphasis: **bold** (key term) and ==highlight== (link to an earlier question) */
+const Piece = ({ part }) => {
+  let n = part.text;
+  if (part.hl) n = <mark className="link-hl">{n}</mark>;
+  if (part.bold) n = <strong className="kw">{n}</strong>;
+  return n;
+};
+
 export function Inline({ text }) {
-  const parts = cleanMath(fixText(text || "")).split(/(\*\*[^*]+\*\*)/g);
+  const nodes = layout(cleanMath(fixText(text || "")));
   return (
     <>
-      {parts.map((p, i) =>
-        /^\*\*[^*]+\*\*$/.test(p)
-          ? <strong key={i} className="kw">{latinWrap(p.slice(2, -2), `b${i}`)}</strong>
-          : <React.Fragment key={i}>{latinWrap(p, `t${i}`)}</React.Fragment>
-      )}
+      {nodes.map((nd, i) => nd.run
+        ? <bdi key={i} dir="ltr" className="en">{nd.parts.map((p, k) => <Piece key={k} part={p} />)}</bdi>
+        : <React.Fragment key={i}>{nd.parts.map((p, k) => <Piece key={k} part={p} />)}</React.Fragment>)}
     </>
   );
 }

@@ -4,10 +4,11 @@ import { Brand, Toast, KeyModal, Confetti } from "./components/ui.jsx";
 import Home from "./screens/Home.jsx";
 import WordsScreen from "./screens/WordsScreen.jsx";
 import Editor from "./screens/Editor.jsx";
+import WordPop from "./components/WordPop.jsx";
 import { store, prefs } from "./lib/storage.js";
 import { ENV_KEY, warmUp, warmConnection } from "./lib/gemini.js";
 import { resizeDataUrl } from "./lib/image.js";
-import { wordLines, studyStats } from "./lib/parse.js";
+import { wordLines, parseWord, studyStats } from "./lib/parse.js";
 import { saveCheer } from "./lib/motivation.js";
 import { learn } from "./lib/progress.js";
 import { setSpeechKey, stopSpeaking } from "./lib/speech.js";
@@ -16,6 +17,20 @@ import { hideSplash } from "./lib/splash.js";
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+/* a compact digest of the saved questions: the model links the new question to them, inside the sentence it belongs to */
+const historyFor = (questions, currentId) => (questions || [])
+  .filter((q) => q && q.id !== currentId && q.title)
+  .slice(0, 120)
+  .map((q) => ({
+    title: String(q.title).replace(/[«»=*\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 70),
+    terms: wordLines(q.new_words || "").slice(0, 8).map((l) => parseWord(l).term.replace(/[*=«»]/g, "").trim()).filter(Boolean),
+  }))
+  .filter((h) => h.title);
+const lessonTitle = (text) => {
+  const line = String(text || "").split("\n").map((l) => l.replace(/^[#>\-*\s]+/, "").replace(/\*\*/g, "").trim())
+    .find((l) => l && !/^(📖|🗂|⏱|المادة بتتكلم|أهم الأجزاء|نوع المادة|What is this|Main parts|Type of)/u.test(l));
+  return line ? (line.length > 60 ? line.slice(0, 58) + "…" : line) : "شرح جديد";
+};
 const titleFrom = (text) => {
   const first = (text || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
   if (!first) return "سؤال بدون عنوان";
@@ -121,7 +136,7 @@ export default function App({ boot }) {
   /* Auto-save, called by the editor (it never navigates away).
      `id` is empty only for the very first save of a new question; after that the editor keeps sending the same id,
      so every later save updates that one question instead of creating a copy. */
-  const saveQuestion = async ({ id: knownId, title, imageUrl, doc, imageChanged, instructions, chips, result }) => {
+  const saveQuestion = async ({ id: knownId, kind, title, imageUrl, doc, imageChanged, instructions, chips, result }) => {
     const id = knownId || uid();
     const existing = qRef.current.find((q) => q.id === id) || null;
     const now = Date.now();
@@ -137,7 +152,7 @@ export default function App({ boot }) {
       }
     }
     const q = {
-      id, title: title.trim() || titleFrom(result.original_question_text), ...result, instructions, chips,
+      id, kind: kind || "question", title: title.trim() || (kind === "lesson" ? lessonTitle(result.original_question_text) : titleFrom(result.original_question_text)), ...result, instructions, chips,
       thumb, createdAt: existing?.createdAt || now, updatedAt: now,
     };
     const prevQ = qRef.current;
@@ -208,16 +223,17 @@ export default function App({ boot }) {
       <main>
         {view.name === "home" ? (
           <Home questions={questions} words={words} goal={goal} onGoal={cycleGoal}
-            onAdd={() => go({ name: "edit" })} onWords={() => go({ name: "words" })}
+            onAdd={() => go({ name: "edit", kind: "question" })} onAddLesson={() => go({ name: "edit", kind: "lesson" })} onWords={() => go({ name: "words" })}
             onOpen={(id) => go({ name: "edit", id })} />
         ) : view.name === "words" ? (
           <WordsScreen words={words} onOpen={(id) => go({ name: "edit", id })} onDeleteEntry={deleteWordEntry} />
         ) : (
-          <Editor key={view.id || "new"} initial={editing} boot={boot} apiKey={apiKey} perf={perf} onLearn={onLearn}
+          <Editor key={`${view.id || "new"}-${view.kind || ""}`} initial={editing} kind={view.kind} history={historyFor(questions, view.id)} boot={boot} apiKey={apiKey} perf={perf} onLearn={onLearn}
             onNeedKey={() => setShowKey(true)} onSave={saveQuestion} onDelete={deleteQuestion} />
         )}
       </main>
 
+      <WordPop apiKey={apiKey} />
       {showKey && <KeyModal current={apiKey === ENV_KEY ? "" : apiKey} hasEnv={!!ENV_KEY} onSave={saveKey} onClose={() => setShowKey(false)} />}
       <Toast msg={toast} />
       {burst > 0 && <Confetti key={burst} />}
