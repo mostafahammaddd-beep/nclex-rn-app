@@ -3,6 +3,10 @@ import Icon from "../components/Icon.jsx";
 import { wordLines, studyStats } from "../lib/parse.js";
 import { levelInfo, weekDays, heroMessage, pickWord } from "../lib/motivation.js";
 import { WordCard } from "../components/rich.jsx";
+import { assignedSet, topicOf } from "../lib/topics.js";
+import { prefs } from "../lib/storage.js";
+import { stampShort } from "../lib/time.js";
+import { useVocab, savedCount } from "../lib/vocab.js";
 
 const fmtDate = (ts) => {
   try { return new Date(ts).toLocaleDateString("ar-EG", { day: "numeric", month: "short" }); }
@@ -19,17 +23,60 @@ function greeting() {
 
 const R = 36, C = 2 * Math.PI * R;
 
-export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesson, onWords, onOpen }) {
+function QCard({ q, onOpen, topic }) {
+  const n = wordLines(q.new_words).length;
+  return (
+    <button className="card qcard" onClick={() => onOpen(q.id)}>
+      <span className="qthumb">
+        {q.thumb ? <img src={q.thumb} alt="" loading="lazy" /> : <Icon name="fileText" size={26} />}
+      </span>
+      <span className="qbody">
+        <h3>{q.title}</h3>
+        <span className="snip" dir="auto">{(q.original_question_text || "—").replace(/[#*>`]/g, "").replace(/\s+/g, " ")}</span>
+        <span className="qfoot">
+          {q.kind === "lesson" && <span className="pill pill-lesson" style={{ padding: "1px 10px" }}>شرح 📖</span>}
+          {topic && <span className="pill pill-topic" style={{ padding: "1px 10px" }} dir="auto">{topic.emoji} {topic.name}</span>}
+          <span className="pill pill-violet" style={{ padding: "1px 10px" }}>{n} كلمة</span>
+          <span title="وقت الحفظ">{stampShort(q.createdAt || q.updatedAt)}</span>
+        </span>
+      </span>
+      <span className="qgo"><Icon name="back" size={18} /></span>
+    </button>
+  );
+}
+
+export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesson, onWords, onOpen, topics, org, onOrganize, onAuto, onOpenTopic, onMove }) {
   const sorted = useMemo(() => [...questions].sort((a, b) => b.updatedAt - a.updatedAt), [questions]);
-  const wordCount = useMemo(() => words.reduce((n, w) => n + wordLines(w.text).length, 0), [words]);
+  const { map: vmap } = useVocab();
+  const wordCount = useMemo(() => savedCount(vmap), [vmap]);
+  const veryN = useMemo(() => Object.values(vmap).filter((e) => e.level === 2).length, [vmap]);
   const stats = useMemo(() => studyStats(questions, goal), [questions, goal]);
   const pct = Math.min(1, stats.today / Math.max(1, goal));
   const left = Math.max(0, goal - stats.today);
   const lv = useMemo(() => levelInfo(questions.length), [questions.length]);
   const week = useMemo(() => weekDays(questions), [questions]);
-  const allLines = useMemo(() => words.flatMap((w) => wordLines(w.text)), [words]);
+  const allLines = useMemo(() => Object.values(vmap).filter((e) => e.level > 0).map((e) => e.line), [vmap]);
   const [shift, setShift] = useState(0);
   const wod = useMemo(() => pickWord(allLines, shift), [allLines, shift]);
+
+  /* ── topics: the AI keeps related questions / lessons / files together ── */
+  const assigned = useMemo(() => assignedSet(topics), [topics]);
+  const pinned = useMemo(() => new Set(topics.pinned), [topics.pinned]);
+  const loose = useMemo(() => sorted.filter((q) => !assigned.has(q.id)), [sorted, assigned]);
+  const waiting = useMemo(() => loose.filter((q) => !pinned.has(q.id)), [loose, pinned]);
+  const topicList = useMemo(() => [...topics.list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)), [topics.list]);
+  const byId = useMemo(() => new Map(questions.map((q) => [q.id, q])), [questions]);
+  const [view, setView] = useState(() => prefs.get("nclex:home:view", "") || "");
+  const mode = view === "all" || view === "topics" ? view : (topics.list.length ? "topics" : "all");
+  const pickView = (v) => { setView(v); prefs.set("nclex:home:view", v); };
+  const [armed, setArmed] = useState(false);
+  useEffect(() => { if (!armed) return undefined; const t = setTimeout(() => setArmed(false), 3000); return () => clearTimeout(t); }, [armed]);
+  const organizeClick = () => {
+    if (org.busy) return;
+    if (waiting.length) { onOrganize(false); return; }
+    if (!armed) { setArmed(true); return; }
+    setArmed(false); onOrganize(true);
+  };
 
   /* the ring fills up when the screen opens (a small reward for looking at your progress) */
   const [shown, setShown] = useState(0);
@@ -59,7 +106,7 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
             <p>{pct >= 1 ? "كمّل لو لسه عندك طاقة" : `فاضل ${left} ${left <= 10 ? "أسئلة" : "سؤال"}`}</p>
             <div className="pills">
               <span className="pill pill-fire"><Icon name="flame" size={14} /> <b>{stats.streak}</b> يوم ورا بعض</span>
-              <span className="pill pill-violet"><Icon name="library" size={14} /> <b>{wordCount}</b> كلمة</span>
+              <span className="pill pill-violet"><Icon name="library" size={14} /> <b>{wordCount}</b> كلمة محفوظة</span>
             </div>
           </div>
         </button>
@@ -101,7 +148,7 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
         <button onClick={onWords} className="cta cta-alt">
           <span>
             <b>قاموس الكلمات</b>
-            <span className="sub">{wordCount ? `${wordCount} مصطلح في قاموسك` : "كل كلمة جديدة بتتحفظ هنا"}</span>
+            <span className="sub">{wordCount ? `${veryN} مهمة جدا · ${wordCount - veryN} مهمة` : "الكلمات اللي تصنّفها ⭐ أو ✓ بتتحفظ هنا"}</span>
           </span>
           <span className="cta-ico"><Icon name="bookOpen" size={26} /></span>
         </button>
@@ -126,6 +173,25 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
       <div className="home-main">
       <h2 className="h-sec">أسئلتك وشروحاتك المحفوظة <span>{sorted.length}</span></h2>
 
+      {sorted.length > 0 && (
+        <div className="tabsbar">
+          <div className="seg tabs" role="tablist" aria-label="طريقة العرض">
+            <button type="button" role="tab" aria-selected={mode === "topics"} data-on={mode === "topics"} onClick={() => pickView("topics")}><Icon name="layers" size={16} /> حسب الموضوع {topics.list.length > 0 && <small>{topics.list.length}</small>}</button>
+            <button type="button" role="tab" aria-selected={mode === "all"} data-on={mode === "all"} onClick={() => pickView("all")}><Icon name="list" size={16} /> الكل <small>{sorted.length}</small></button>
+          </div>
+          <div className="org-row">
+            <button type="button" className="btn btn-ghost btn-sm org-btn" onClick={organizeClick} disabled={org.busy} data-armed={armed}>
+              <Icon name="sparkles" size={15} />
+              {org.busy ? `بينظّم… ${org.done}/${org.total}` : waiting.length ? `نظّم الجديد (${waiting.length}) بالـ AI` : armed ? "تأكيد؟ هيعيد ترتيب كل المواضيع" : "أعد ترتيب الكل"}
+            </button>
+            <button type="button" className="org-auto" data-on={topics.auto} onClick={() => onAuto(!topics.auto)} aria-pressed={topics.auto} title="لما تحفظ سؤال جديد، الـ AI يحطه في موضوعه لوحده">
+              <i /> تنظيم تلقائي
+            </button>
+          </div>
+          {org.err && <p className="org-err" role="alert">{org.err}</p>}
+        </div>
+      )}
+
       {sorted.length === 0 ? (
         <div className="card empty">
           <span className="empty-ico"><Icon name="heartPulse" size={34} /></span>
@@ -133,28 +199,51 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
           <p>ارفع أول سؤال وشوف التفصيص بنفسك. كل سؤال بتفهمه بيقرّبك من الرخصة 💙</p>
           <button onClick={onAdd} className="btn btn-teal" style={{ marginTop: 8 }}>أضف أول سؤال</button>
         </div>
+      ) : mode === "topics" ? (
+        <>
+          {topicList.length === 0 && (
+            <div className="card empty topic-empty">
+              <span className="empty-ico"><Icon name="layers" size={32} /></span>
+              <b>{org.busy ? "بنرتّب أسئلتك على حسب الموضوع…" : "لسه ما اتنظّمتش المواضيع"}</b>
+              <p>الـ AI بيجمّع الأسئلة والشروحات والملفات اللي عن نفس الموضوع في مكان واحد، علشان تتنقل بينها بسهولة.</p>
+              {!org.busy && <button onClick={() => onOrganize(false)} className="btn btn-teal" style={{ marginTop: 8 }}><Icon name="sparkles" size={18} /> نظّم أسئلتي</button>}
+            </div>
+          )}
+          {topicList.length > 0 && (
+            <div className="tlist">
+              {topicList.map((t) => {
+                const its = t.qids.map((id) => byId.get(id)).filter(Boolean);
+                const nl = its.filter((q) => q.kind === "lesson").length;
+                const thumbs = its.filter((q) => q.thumb).slice(0, 3);
+                return (
+                  <button key={t.id} type="button" className="card tcard" onClick={() => onOpenTopic(t.id)}>
+                    <span className="tc-emoji" aria-hidden="true">{t.emoji || "📘"}</span>
+                    <span className="tc-body">
+                      <h3 dir="auto">{t.name}</h3>
+                      {t.summary && <span className="tc-sum" dir="auto">{t.summary}</span>}
+                      <span className="qfoot">
+                        <span className="pill" style={{ padding: "1px 10px" }}>{its.length - nl} أسئلة</span>
+                        {nl > 0 && <span className="pill pill-lesson" style={{ padding: "1px 10px" }}>{nl} شرح 📖</span>}
+                        <span>{fmtDate(t.updatedAt)}</span>
+                      </span>
+                    </span>
+                    {thumbs.length > 0 && <span className="tc-thumbs" aria-hidden="true">{thumbs.map((q) => <img key={q.id} src={q.thumb} alt="" loading="lazy" />)}</span>}
+                    <span className="qgo"><Icon name="back" size={18} /></span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {loose.length > 0 && (
+            <>
+              <h3 className="h-sub">بدون موضوع <span>{loose.length}</span></h3>
+              <div className="qlist">{loose.map((q) => <QCard key={q.id} q={q} onOpen={onOpen} />)}</div>
+            </>
+          )}
+        </>
       ) : (
         <div className="qlist">
-          {sorted.map((q) => {
-            const n = wordLines(q.new_words).length;
-            return (
-              <button key={q.id} className="card qcard" onClick={() => onOpen(q.id)}>
-                <span className="qthumb">
-                  {q.thumb ? <img src={q.thumb} alt="" loading="lazy" /> : <Icon name="fileText" size={26} />}
-                </span>
-                <span className="qbody">
-                  <h3>{q.title}</h3>
-                  <span className="snip" dir="auto">{(q.original_question_text || "—").replace(/[#*>`]/g, "").replace(/\s+/g, " ")}</span>
-                  <span className="qfoot">
-                    {q.kind === "lesson" && <span className="pill pill-lesson" style={{ padding: "1px 10px" }}>شرح 📖</span>}
-                    <span className="pill pill-violet" style={{ padding: "1px 10px" }}>{n} كلمة</span>
-                    <span>{fmtDate(q.updatedAt)}</span>
-                  </span>
-                </span>
-                <span className="qgo"><Icon name="back" size={18} /></span>
-              </button>
-            );
-          })}
+          {sorted.map((q) => <QCard key={q.id} q={q} onOpen={onOpen} topic={topicOf(topics, q.id)} />)}
         </div>
       )}
       </div>

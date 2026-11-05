@@ -7,6 +7,7 @@ import "@fontsource/cairo/900.css";
 import "./styles.css";
 import App from "./App.jsx";
 import { loadBoot } from "./lib/storage.js";
+import { initVocab } from "./lib/vocab.js";
 import { splashFailsafe } from "./lib/splash.js";
 
 /* ───────── start-up ─────────
@@ -31,13 +32,14 @@ async function fontsReady() {
   } catch (e) { /* fall back to system font */ }
 }
 
-const EMPTY_BOOT = { questions: [], words: [], apiKey: "", mode: null, goal: 5, perf: {} };
+const EMPTY_BOOT = { questions: [], words: [], apiKey: "", mode: null, goal: 5, perf: {}, topics: { list: [], pinned: [], auto: true }, vocab: {} };
 
 async function start() {
   const [boot] = await Promise.all([
     withTimeout(loadBoot(), 1500).then((b) => b || EMPTY_BOOT).catch(() => EMPTY_BOOT),
     fontsReady(),
   ]);
+  initVocab(boot.vocab);
   createRoot(document.getElementById("root")).render(<App boot={boot} />);
 }
 

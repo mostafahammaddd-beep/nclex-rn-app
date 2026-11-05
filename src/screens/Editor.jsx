@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
 import Icon from "../components/Icon.jsx";
 import { AutoTextArea, ConfirmButton } from "../components/ui.jsx";
 import { Monitor } from "../components/Progress.jsx";
@@ -11,6 +11,9 @@ import ChatPanel from "../components/ChatPanel.jsx";
 import SourceBox from "../components/SourceBox.jsx";
 import { warmConnection } from "../lib/gemini.js";
 import { store } from "../lib/storage.js";
+import { stamp } from "../lib/time.js";
+import { wordLines } from "../lib/parse.js";
+import { detectQuestions, runBatch, focusNote } from "../lib/batch.js";
 
 const TASK_OF = { original_question_text: "ocr", new_words: "words", explanation: "reason", tricks: "reason" };
 const NULLS = { original_question_text: null, new_words: null, explanation: null, tricks: null };
@@ -28,7 +31,7 @@ const Skeleton = ({ hint }) => (
   </div>
 );
 
-const ResultSection = memo(function ResultSection({ section, value, onChange, running, error, onRetry, defaultOpen }) {
+const ResultSection = memo(function ResultSection({ section, value, onChange, running, error, onRetry, defaultOpen, src }) {
   const { key, title, sub, icon, rows, cls, ltr, wait } = section;
   const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -80,7 +83,7 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
         ) : !hasText ? (
           !running && !error && <button onClick={() => setEditing(true)} className="btn btn-ghost" style={{ width: "100%" }}>فاضي. دوس هنا واكتب بنفسك</button>
         ) : key === "new_words" ? (
-          <WordList text={value} warm={!running} />
+          <WordList text={value} warm={!running} src={src} onRemove={(l) => onChange(key, wordLines(value).filter((x) => x !== l).join("\n"))} />
         ) : key === "original_question_text" && !section.rich ? (
           <QuestionView text={value} />
         ) : (
@@ -100,7 +103,46 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
 
 /* ───────── editor ───────── */
 
-export default function Editor({ initial, history, kind: kindProp, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete }) {
+
+/* the list of questions found in one upload: one row each, in order, with live status and a button to open it */
+const ST = { wait: "في الانتظار", run: "بيتحلل…", done: "اتحفظ ✅", partial: "اتحفظ (جزء ناقص)", error: "فشل", stopped: "اتوقف" };
+function BatchPanel({ batch, onOpen, onStop, onClose }) {
+  const { phase, rows, total } = batch;
+  const finished = phase === "finished";
+  const saved = rows.filter((r) => r.id).length;
+  const live = phase === "run";
+  return (
+    <div className="card batch" role="status" aria-live="polite">
+      {phase === "detect" && (
+        <div className="batch-head"><b>بدوّر على الأسئلة في الملفات…</b><button type="button" className="btn btn-ghost btn-sm" onClick={onStop}>إلغاء</button></div>
+      )}
+      {phase === "none" && (
+        <div className="batch-head"><b>ما لقيتش الأسئلة اللي حددتها في الملفات. راجع الملاحظة (أرقام الأسئلة) وجرّب تاني.</b><button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>تمام</button></div>
+      )}
+      {(live || finished) && (
+        <>
+          <div className="batch-head">
+            <b>{finished ? `خلص: ${saved} من ${rows.length} اتحفظوا` : `بحلل ${rows.length} سؤال${total > rows.length ? ` من ${total} (المطلوبين بس)` : ""}`}</b>
+            {live ? <button type="button" className="btn btn-ghost btn-sm" onClick={onStop}>إيقاف</button> : <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>إخفاء</button>}
+          </div>
+          <ol className="batch-list">
+            {rows.map((r) => (
+              <li key={r.key} data-st={r.status}>
+                <span className="batch-n">{r.n}</span>
+                <span className="batch-t" dir="auto"><b>{r.title || r.start || `سؤال ${r.n}`}</b>{r.err && r.status !== "done" ? <small>{r.err}</small> : null}</span>
+                <span className="batch-s">{ST[r.status]}</span>
+                {r.id && <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(r.id)}>افتح</button>}
+              </li>
+            ))}
+          </ol>
+          {finished && <small className="batch-foot">كل سؤال اتحفظ لوحده وهيتنظّم تلقائي في موضوعه (من «المواضيع»).</small>}
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function Editor({ initial, history, kind: kindProp, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete, nav, onNavTo, onOpenTopic, onMove, library, onOpenItem }) {
   const kind = initial?.kind || kindProp || "question";   // "question" (exam question) | "lesson" (study material → explanation)
   const isLesson = kind === "lesson";
   const sections = sectionsFor(kind);
@@ -130,6 +172,8 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   const [lastRun, setLastRun] = useState(null);  // { sec } of the last completed run
   const [timing, setTiming] = useState({});     // task → measured timings of the last run (shown under the result)
 
+  const [batch, setBatch] = useState(null);   // many questions in one upload: { phase: "detect" | "run" | "none", rows, total, error }
+  const batchRef = useRef(null);
   const fileRef = useRef(null);
   const resultRef = useRef(null);
   const an = useRef(null);
@@ -142,6 +186,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   perfRef.current = perf;
   modeRef.current = mode;
 
+  const lib = useMemo(() => (library ? { ...library, focusId: initial?.id || null } : undefined), [library, initial?.id]);
   const running = Object.values(status).some((s) => s === "run");
   const canChat = !running && !!((result?.original_question_text || "").trim() || (result?.explanation || "").trim());
   const started = !!result;
@@ -152,6 +197,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   const [savedId, setSavedId] = useState(initial?.id || null);
   const [imgRev, setImgRev] = useState(0);                                    // bumps only when the person changes / removes the picture
   const savedIdRef = useRef(initial?.id || null);
+  const wsrc = useMemo(() => ({ qid: savedIdRef.current || initial?.id || null, title: (title || "").trim() || initial?.title || "" }), [savedId, title, initial?.id, initial?.title]); // eslint-disable-line react-hooks/exhaustive-deps
   const savedImgRev = useRef(initial ? 0 : -1);
   const lastSig = useRef(null);       // what is already stored; unchanged content is never re-saved
   const saveTimer = useRef(0);
@@ -349,14 +395,40 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
     saveTimer.current = setTimeout(persist, savedIdRef.current ? 900 : 250);
   }, [sigNow, running]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const makeAnalysis = () => createAnalysis({
-    kind, history, dataUrl: imageUrl, doc, extra: instructions, chips, apiKey, modeId: mode,
+  const makeAnalysis = (hint) => createAnalysis({
+    kind, history, dataUrl: imageUrl, doc, extra: hint ? `${hint}` : instructions, chips, apiKey, modeId: mode,
     onUpdate, onDone, onError,
   });
 
-  const analyze = () => {
+  /* several files, or a note that picks questions → first find the questions (one small request), then analyse each one alone */
+  const analyze = async () => {
     if (!items.length) { setError({ msg: isLesson ? "ارفع المادة أو الصق نصها الأول." : "ارفع السؤال (صورة أو ملف) أو اكتب نصه الأول." }); return; }
     if (!apiKey) { setError({ msg: "محتاج تحط مفتاح Gemini الأول. دوس على أيقونة 🔑 فوق." }); onNeedKey(); return; }
+    if (isLesson || (items.length < 2 && !instructions.trim())) return analyzeOne();
+    batchRef.current?.cancel && batchRef.current.cancel();
+    const ctrl = new AbortController();
+    batchRef.current = { cancel: () => ctrl.abort() };
+    setError(null); setBatch({ phase: "detect", rows: [], total: 0 });
+    try {
+      const { questions, total } = await detectQuestions({ apiKey, items, note: instructions, signal: ctrl.signal });
+      if (ctrl.signal.aborted) return;
+      if (!questions.length) { setBatch({ phase: "none", rows: [], total }); return; }
+      if (questions.length === 1 && total <= 1) { setBatch(null); batchRef.current = null; return analyzeOne(focusNote(questions[0], instructions)); }
+      const run = runBatch({
+        apiKey, items, plan: questions, note: instructions, chips, history, modeId: modeRef.current,
+        save: (p) => onSave(p), onState: (rows) => setBatch({ phase: "run", rows, total }), onFatal: () => onNeedKey(),
+      });
+      batchRef.current = run;
+      run.done.then(() => setBatch((b) => (b ? { ...b, phase: "finished" } : b)));
+    } catch (err) {
+      if (ctrl.signal.aborted) return;
+      setBatch(null); batchRef.current = null;
+      setError({ msg: err.message || "حصلت مشكلة أثناء تقسيم الأسئلة.", detail: err.detail });
+      if (err.fatal) onNeedKey();
+    }
+  };
+
+  const analyzeOne = (hint) => {
     an.current?.cancel();
     clearTimeout(timer.current); timer.current = 0; buf.current = {};
     clearTimeout(saveTimer.current); pendingSave.current = false; autoOK.current = false;
@@ -366,7 +438,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
     setError(null); setErrors({}); setModels({}); setLastRun(null); setTiming({});
     setResult({ ...NULLS });
     setStatus({ ocr: "run", words: "run", reason: "run" });
-    an.current = makeAnalysis();
+    an.current = makeAnalysis(hint);
     setRunId((n) => n + 1);
     an.current.start();
   };
@@ -433,8 +505,21 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
 
   return (
     <div className="page">
+      {nav ? (
+        <div className="topic-nav" role="navigation" aria-label="التنقل داخل الموضوع">
+          <button type="button" className="iconbtn" disabled={!nav.prev} onClick={() => onNavTo(nav.prev)} aria-label="السابق في الموضوع"><Icon name="chevRight" size={18} /></button>
+          <button type="button" className="tn-mid" onClick={() => onOpenTopic(nav.topic.id)} dir="auto">
+            <span className="tn-emoji">{nav.topic.emoji || "📘"}</span><b>{nav.topic.name}</b><small>{nav.index} / {nav.total}</small>
+          </button>
+          <button type="button" className="iconbtn" disabled={!nav.next} onClick={() => onNavTo(nav.next)} aria-label="التالي في الموضوع"><Icon name="chevLeft" size={18} /></button>
+          <button type="button" className="iconbtn" onClick={() => onMove(initial.id)} aria-label="غيّر الموضوع" title="غيّر الموضوع"><Icon name="folder" size={17} /></button>
+        </div>
+      ) : initial?.id ? (
+        <button type="button" className="topic-nav tn-none" onClick={() => onMove(initial.id)}><Icon name="folder" size={16} /> بدون موضوع — دوس لتحديد موضوع</button>
+      ) : null}
       <div className="page-head">
         <h1>{savedId ? (isLesson ? "تعديل الشرح" : "تعديل السؤال") : (isLesson ? "شرح جديد" : "سؤال جديد")}</h1>
+        {savedId && initial?.createdAt && <span className="saved-at" title="وقت الحفظ">🕒 {stamp(initial.createdAt)}</span>}
         {savedId && <ConfirmButton onConfirm={removeQuestion} label={isLesson ? "حذف الشرح" : "حذف السؤال"} />}
       </div>
 
@@ -442,6 +527,14 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
         <aside className="ed-side">
         {/* 1 · the source: any files and/or typed text */}
         <SourceBox kind={kind} items={items} imageUrl={imageUrl} onFiles={addFiles} onText={addText} onRemove={removeItem} onClear={clearItems} />
+
+        {/* the note: tells the AI WHICH questions / pages to work on, and any extra instruction */}
+        <div>
+          <label htmlFor="q-extra" className="label">ملاحظات للذكاء الاصطناعي <small style={{ opacity: .65 }}>(اختياري)</small></label>
+          <textarea id="q-extra" dir="auto" rows={2} value={instructions} onChange={(e) => setInstructions(e.target.value)}
+            className="input area" style={{ overflow: "auto" }}
+            placeholder={isLesson ? "مثلاً: اشرح من صفحة 20 لـ 50 بس، أو الفصل التالت بس" : "مثلاً: حلّل السؤال 1 و7 و8 بس. من غير ملاحظة هيحلل كل الأسئلة المرفوعة"} />
+        </div>
 
         {/* 2 · mode */}
         <div>
@@ -468,9 +561,6 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
               <label htmlFor="q-title" className="label">عنوان السؤال</label>
               <input id="q-title" value={title} onChange={(e) => setTitle(e.target.value)} className="input" dir="auto"
                 placeholder="سيبه فاضي وهنسمّيه من نص السؤال" />
-              <label htmlFor="q-extra" className="label" style={{ marginTop: 14 }}>تعليمات إضافية للذكاء الاصطناعي</label>
-              <textarea id="q-extra" dir="auto" rows={2} value={instructions} onChange={(e) => setInstructions(e.target.value)}
-                className="input area" style={{ overflow: "auto" }} placeholder="مثلاً: ركّز على الأدوية أو اشرح الـ rationale بالتفصيل" />
               <div className="chips">
                 {CHIPS.map((c) => (
                   <button key={c.id} type="button" aria-pressed={chips.includes(c.id)} data-on={chips.includes(c.id)}
@@ -486,7 +576,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
         </div>
 
         {!started && (
-          <button onClick={analyze} disabled={!items.length} className="btn btn-teal btn-go">
+          <button onClick={analyze} disabled={!items.length || (batch && batch.phase !== "none")} className="btn btn-teal btn-go">
             <Icon name="sparkles" size={24} /> {isLesson ? "اشرحلي المادة" : "حلّل السؤال"}
           </button>
         )}
@@ -502,6 +592,8 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
         )}
 
         </aside>
+
+        {batch && <BatchPanel batch={batch} onOpen={onOpenItem} onStop={() => { batchRef.current?.cancel && batchRef.current.cancel(); if (batch.phase === "detect") setBatch(null); }} onClose={() => { setBatch(null); batchRef.current = null; }} />}
 
         {/* 4 · results */}
         {started && (
@@ -520,7 +612,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
               return (
                 <ResultSection key={s.key} section={s} value={result[s.key]} onChange={setField}
                   running={status[task] === "run"} error={s.key === "tricks" ? null : errors[task]}
-                  onRetry={retry} defaultOpen={!initial} />
+                  onRetry={retry} defaultOpen={!initial} src={wsrc} />
               );
             })}
           </div>
@@ -537,7 +629,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
           {chatEver && (
             <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} apiKey={apiKey} onNeedKey={onNeedKey}
               ctx={{ kind, question: result?.original_question_text, explanation: result?.explanation, tricks: result?.tricks, imageUrl, doc }}
-              chipIds={chips} storeKey={savedId ? `nclex:chat:${savedId}` : null} />
+              chipIds={chips} storeKey={savedId ? `nclex:chat:${savedId}` : null} library={lib} onOpenItem={onOpenItem} />
           )}
         </>
       )}

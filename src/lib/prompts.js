@@ -6,7 +6,7 @@
 
    Five focused jobs (each prompt does ONE thing well, and they run in parallel where possible):
    1) OCR      → question text                          (fast model, no thinking)
-   2) WORDS    → every A2-unknown word                  (fast model, no thinking)
+   2) WORDS    → every word at B1 level or higher                  (fast model, no thinking)
    3) SOLVE    → verified answer + per-option verdicts  (strong model, thinks, tiny output)
    4) LESSON A → ask · decode English · basics          (fast model, needs no answer → starts at t = 0)
    5) LESSON B → steps · options · answer · memo · tricks (fast model, starts when SOLVE has the answer) */
@@ -38,31 +38,31 @@ Output PLAIN TEXT only (no markdown, no JSON, no code fences, no commentary):
   };
 }
 
-/* 2 ─ New words (A2 learner) */
+/* 2 ─ New words (B1 level or higher) */
 export function buildWordsPrompt(chipIds, kind = "question") {
   const english = has(chipIds, "en");
   const meaning = english
-    ? "the meaning in very simple English (A2 words, max 8 words)"
+    ? "the meaning in simple English (B1 words, max 10 words)"
     : "المعنى بالعربي (بسيط وواضح ومناسب لسياق التمريض والسؤال)";
   const sample = english
     ? "edema — swelling caused by extra fluid in the body tissues\nPRN — as needed (when the patient needs it)\nprioritize — decide what must be done first\nadverse — harmful and not wanted\nrequires further teaching — the patient did not understand and needs more explanation"
     : "edema — وذمة (تورّم بسبب تجمّع سوائل زيادة في الأنسجة)\nPRN — عند الحاجة (حسب طلب المريض)\nprioritize — يحدّد الأولوية (إيه اللي يتعمل الأول)\nadverse — ضارّ وغير مرغوب\nrequires further teaching — محتاج شرح أكتر (المريض مفهمش كويس)";
   const out = {
-    system: `You are a vocabulary coach for an Arabic-speaking nursing student whose English level is A2 (beginner). He is preparing for the NCLEX-RN, which is 100% in English.
+    system: `You are a vocabulary coach for an Arabic-speaking nursing student whose English level is B1 (intermediate). He is preparing for the NCLEX-RN, which is 100% in English.
 
 The image shows ONE NCLEX-style question. Read EVERY word in it: the stem, the patient data, any exhibit / table / lab values, and ALL the answer options (for Next-Gen items also every tab, drop-down choice and matrix row).
 
-TASK: list EVERY word or short phrase in the image that a typical A2 learner would NOT understand on sight.
-A2 means roughly the 1,500 most common English words. Anything outside that everyday core is a candidate.
-Be exhaustive. There is NO maximum — a typical question gives 20 to 45 entries. Never stop early and never keep only "the important ones".
+TASK: list EVERY word or short phrase in the image whose level is B1 OR HIGHER (B1, B2, C1, C2) and every medical / nursing term.
+B1 itself IS included: a word that is exactly at B1 level (not a beginner word) belongs in the list. Only the beginner levels A1 and A2 are left out.
+Be thorough. There is NO fixed maximum — a typical question gives 15 to 40 entries. Never stop early.
 
-INCLUDE everything above A2 level:
+INCLUDE:
 • medical, nursing and anatomy terms; diseases, symptoms, procedures, tests and lab names; drug names (add the drug class inside the meaning when you know it)
 • abbreviations and symbols (NPO, PRN, BID, IV, I&O, mmHg …) — give the full form too
-• ordinary English words that an A2 learner does not know (e.g. prioritize, intervene, adverse, ensure, appropriate, indicates, monitor, further, immediately, instruct, complains of, is scheduled for, reports, expected, recommended), phrasal verbs and idioms
+• general English words at B1, B2, C1 or C2 level (e.g. monitor, ensure, report, appropriate, recommend, instruct, immediately, expected, further, prioritize, intervene, adverse, ensue, administer, contraindicated, exacerbation, subsequent, refrain, impaired, deteriorate, cessation), phrasal verbs and idioms
 • exam keywords: EXCEPT, FIRST, BEST, NEXT, MOST, PRIORITY, "requires further teaching" …
-EXCLUDE only very basic A1–A2 words (patient, nurse, doctor, hospital, pain, blood, water, eat, drink, sleep, walk, morning …), people's names, plain numbers and units.
-If you are not sure the student knows a word, INCLUDE it.
+EXCLUDE only beginner words at A1 or A2 level (patient, nurse, doctor, hospital, pain, blood, water, eat, drink, sleep, walk, go, take, good, bad, big …), people's names, plain numbers and units.
+If you hesitate between A2 and B1 for a general word, LEAVE IT OUT: he already knows it, and listing it wastes his time. Never list everyday words such as ask, check, feel, need, help, tell, keep, wait, call, change, follow, problem, important, normal, usual, sudden, ready. Medical or clinical terms and abbreviations are always included.
 
 HOW TO WORK: go through the text sentence by sentence, then option by option, in reading order, so nothing is skipped. Write every entry once (no duplicates) and keep the exact form used in the question (e.g. "edematous"). Give the meaning that fits THIS question.
 
@@ -81,7 +81,7 @@ function asStudy(p) {
   return {
     system: p.system
       .replace(/The image shows ONE NCLEX-style question\. Read EVERY word in it:[^\n]*/, "The files contain STUDY MATERIAL (book pages, lecture notes, slides, tables, pasted text). Read ALL of it.")
-      .replace("in the image that a typical A2 learner", "in the material that a typical A2 learner")
+      .replace("in the image whose level is B1", "in the material whose level is B1")
       .replace(/Be exhaustive\. There is NO maximum[^\n]*/, "Be thorough. For long material keep the most useful entries (up to about 90): medical and nursing terms first, then exam English.")
       .replace("go through the text sentence by sentence, then option by option, in reading order", "go through the material in reading order")
       .replace("fits THIS question.", "fits THIS material."),

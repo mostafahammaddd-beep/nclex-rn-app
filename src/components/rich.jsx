@@ -1,9 +1,10 @@
-import React, { memo, useMemo, useEffect } from "react";
+import React, { memo, useMemo, useEffect, useState } from "react";
 import Icon from "./Icon.jsx";
 import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
-import { speak, prefetch, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
+import { speak, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
 import { fixText } from "../lib/text.js";
 import { layout } from "../lib/emphasis.js";
+import { useVocab, setLevel, removeWord, vocabKey } from "../lib/vocab.js";
 
 /* ───────── pronunciation button (American male voice, see lib/speech.js) ───────── */
 
@@ -14,7 +15,7 @@ export function SpeakBtn({ text, label = "اسمع النطق", ahead }) {
     <span className="speak-wrap">
       <button type="button" className="speak" data-s={st} aria-pressed={st === "play"}
         aria-label={st === "idle" ? label : "إيقاف الصوت"}
-        onClick={() => { speak(text); if (ahead) prefetch(ahead.split("\n")); }}>
+        onClick={() => speak(text)}>   {/* one request per tap, never "ahead": nothing is fetched for words you do not play */}
         <Icon name="volume" size={18} />
       </button>
       {/* small speed control right under the speaker: 0.5× → 0.75× → 1× → 1.25× (applies to every speaker) */}
@@ -133,33 +134,80 @@ export const QuestionView = memo(function QuestionView({ text }) {
 
 /* ───────── vocabulary ───────── */
 
-export const WordCard = memo(function WordCard({ line, ahead }) {
+/* classify a word: ⭐ very important · ✓ important (both are saved in the dictionary) · ✕ not important (never saved, card is dimmed) */
+export function ClassifyBar({ term, line, src, level }) {
+  const { map } = useVocab();
+  const lv = level !== undefined ? level : (map[vocabKey(term)] || {}).level || 0;
+  const btn = (l, icon, label, tip) => (
+    <button type="button" className="cls" data-l={l} data-on={lv === l} aria-pressed={lv === l} title={tip}
+      onClick={() => setLevel(term, line, l, src)}>
+      <Icon name={icon} size={14} stroke={2.4} fill={icon === "star" && lv === l ? "currentColor" : "none"} /> <span>{label}</span>
+    </button>
+  );
+  return (
+    <div className="cls-bar" role="group" aria-label="تصنيف الكلمة">
+      {btn(2, "star", "مهمة جدا", "مهمة جدا: تتحفظ في القاموس (نافذة المهمة جدا)")}
+      {btn(1, "check", "مهمة", "مهمة: تتحفظ في القاموس (نافذة المهمة)")}
+      {btn(-1, "x", "مش مهمة", "مش مهمة: ما تتحفظش في القاموس")}
+    </div>
+  );
+}
+
+/* two-tap delete: first tap asks, second tap deletes (the word also leaves the dictionary) */
+function DelBtn({ onDelete }) {
+  const [ask, setAsk] = useState(false);
+  useEffect(() => { if (!ask) return undefined; const t = setTimeout(() => setAsk(false), 3000); return () => clearTimeout(t); }, [ask]);
+  return (
+    <button type="button" className="word-del" data-ask={ask} aria-label={ask ? "تأكيد حذف الكلمة" : "حذف الكلمة"} title="حذف الكلمة"
+      onClick={() => { if (ask) onDelete(); else setAsk(true); }}>
+      <Icon name="trash" size={15} /> {ask && <span>تأكيد الحذف؟</span>}
+    </button>
+  );
+}
+
+export const WordCard = memo(function WordCard({ line, ahead, src, noClassify, onDelete }) {
   const { term, meaning, note } = parseWord(line);
+  const { map } = useVocab();
+  const lv = (map[vocabKey(term)] || {}).level || 0;
   const dir = hasArabic(meaning + note) ? "rtl" : "ltr";
   return (
-    <div dir={dir} className="word">
+    <div dir={dir} className="word" data-lv={lv}>
       <div className="word-top">
         <bdi dir="ltr" className="word-term">{cleanMath(term)}</bdi>
         <SpeakBtn text={cleanMath(term)} ahead={ahead} />
+        {onDelete && <DelBtn onDelete={onDelete} />}
       </div>
       {meaning && <p className="word-mean"><Inline text={meaning} /></p>}
       {note && <p className="word-note"><Inline text={note} /></p>}
+      {!noClassify && <ClassifyBar term={cleanMath(term)} line={line} src={src} level={lv} />}
     </div>
   );
 });
 
 const termOf = (l) => cleanMath(parseWord(l).term);
 
-export function WordList({ text, showCount = true, warm = false }) {
+export function WordList({ text, showCount = true, warm = false, src, onRemove }) {
   const lines = useMemo(() => wordLines(text), [text]);
-  /* when the list is opened (and nothing is being generated) the first words are fetched quietly, so the first tap is instant */
-  useEffect(() => { if (warm) prefetch(lines.slice(0, 3).map(termOf)); }, [warm]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { map } = useVocab();
+  const [f, setF] = useState("all");   // all | new | 2 | 1 | -1
+  const lvOf = (l) => (map[vocabKey(parseWord(l).term)] || {}).level || 0;
+  const counts = { 2: 0, 1: 0, "-1": 0, new: 0 };
+  lines.forEach((l) => { const v = lvOf(l); if (v) counts[v] += 1; else counts.new += 1; });
+  const shown = lines.filter((l) => f === "all" || (f === "new" ? !lvOf(l) : lvOf(l) === +f));
+  /* the words of an opened question are NOT fetched ahead any more: pronunciation is loaded only when the student taps a speaker */
   return (
     <div>
-      {showCount && lines.length > 0 && <p className="words-count">{lines.length} كلمة / عبارة</p>}
+      {showCount && lines.length > 0 && (
+        <div className="words-filter" role="tablist" aria-label="فلتر الكلمات">
+          {[["all", `الكل ${lines.length}`], ["new", `لسه ${counts.new}`], ["2", `⭐ ${counts[2]}`], ["1", `✓ ${counts[1]}`], ["-1", `✕ ${counts["-1"]}`]].map(([k, label]) => (
+            <button key={k} type="button" role="tab" aria-selected={f === k} data-on={f === k} onClick={() => setF(k)}>{label}</button>
+          ))}
+        </div>
+      )}
       <div className="words">
-        {lines.map((l, i) => <WordCard key={i} line={l} ahead={lines.slice(i + 1, i + 3).map(termOf).join("\n")} />)}
+        {shown.map((l, i) => <WordCard key={l} line={l} src={src} onDelete={onRemove ? () => { removeWord(parseWord(l).term); onRemove(l); } : undefined} ahead={shown.slice(i + 1, i + 2).map(termOf).join("\n")} />)}
       </div>
+      {showCount && lines.length > 0 && shown.length === 0 && <p className="words-count">مفيش كلمات في الفلتر ده.</p>}
     </div>
   );
 }

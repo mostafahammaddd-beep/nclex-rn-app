@@ -300,12 +300,19 @@ export function sourceParts(doc, dataUrl) {
 
 /* prepended to every prompt: the prompts talk about "the image"; this says what the model really received */
 export function sourceNote(doc, extra, kind = "question") {
-  if (!doc) return "";
+  if (!doc) {
+    const f = String(extra || "").trim();
+    /* one screenshot picked out of a batch: the pin to ONE question must reach every request (OCR, words, solve, lessons) */
+    return f.startsWith("Work ONLY on question") ? `SOURCE NOTE: ${f}\n\n` : "";
+  }
   const n = itemsFromSaved(null, doc).length;
   const files = n > 1 ? `${n} files (screenshots, pages, PDFs or text, in the given order)` : "one file (a PDF or a text document)";
-  const t = String(extra || "").trim().slice(0, 300);
+  const t = String(extra || "").trim().slice(0, 600);
   if (kind === "lesson") {
-    return `SOURCE NOTE: the study material is ${files}, not a single screenshot. Treat everything given as ONE body of study material, in order. Wherever the instructions say "image" or "screenshot", read it as this material.${t ? ` The student's note: «${t}».` : ""}\n\n`;
+    const scope = t
+      ? ` SCOPE — OBEY STRICTLY: the student's note says: «${t}». If it limits the material (pages, a page range, chapters, sections, headings, files, images or topics: "pages 20 to 50", "chapter 3 only", "the second file"), study, summarise, explain and list words ONLY from that part and COMPLETELY IGNORE everything else in the files, even if it looks important. Page numbers mean the page numbers printed on the pages when visible, otherwise the order of the pages in the file. If the note is only a style request (e.g. "focus on drugs"), use the whole material and follow the request.`
+      : "";
+    return `SOURCE NOTE: the study material is ${files}, not a single screenshot. Treat everything given as ONE body of study material, in order. Wherever the instructions say "image" or "screenshot", read it as this material.${scope}\n\n`;
   }
   const pick = t
     ? `The student's note (it may name the question number or page to use) is: «${t}». Follow it if it points to a question; otherwise use the first complete question.`

@@ -3,6 +3,8 @@
    `loadBoot()` reads everything the first screen needs in ONE transaction so the
    app can render its final UI on the very first paint (no spinner, no layout jump). */
 
+import { shapeTopics } from "./topics.js";
+
 let _dbp = null;
 const openDb = () => {
   if (!_dbp) {
@@ -51,7 +53,7 @@ export const store = {
   },
 };
 
-const BOOT_KEYS = ["nclex:questions", "nclex:words", "nclex:apikey", "nclex:mode", "nclex:goal", "nclex:perf"];
+const BOOT_KEYS = ["nclex:questions", "nclex:words", "nclex:apikey", "nclex:mode", "nclex:goal", "nclex:perf", "nclex:topics", "nclex:vocab"];
 
 export async function loadBoot() {
   try {
@@ -82,6 +84,8 @@ function shape(o) {
     apiKey: typeof o["nclex:apikey"] === "string" ? o["nclex:apikey"].trim() : "",
     mode: typeof o["nclex:mode"] === "string" ? o["nclex:mode"] : null,
     goal: Number.isFinite(o["nclex:goal"]) ? o["nclex:goal"] : 5,
+    topics: shapeTopics(o["nclex:topics"]),
+    vocab: o["nclex:vocab"] && typeof o["nclex:vocab"] === "object" ? o["nclex:vocab"] : {},
     perf: o["nclex:perf"] && typeof o["nclex:perf"] === "object" ? o["nclex:perf"] : {},
   };
 }

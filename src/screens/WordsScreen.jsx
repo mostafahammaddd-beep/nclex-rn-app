@@ -2,113 +2,105 @@ import React, { useState, useMemo } from "react";
 import Icon from "../components/Icon.jsx";
 import { ConfirmButton } from "../components/ui.jsx";
 import { WordCard } from "../components/rich.jsx";
-import { wordLines } from "../lib/parse.js";
+import { wordLines, parseWord } from "../lib/parse.js";
+import { useVocab, listLevel, vocabKey, dueWords } from "../lib/vocab.js";
+import ReviewModal from "../components/ReviewModal.jsx";
 
-const fmtDate = (ts) => {
-  try { return new Date(ts).toLocaleDateString("ar-EG", { day: "numeric", month: "short" }); }
-  catch (e) { return ""; }
-};
-
-const SPLIT = /\s[—–]\s|\s-\s/;
-
-export default function WordsScreen({ words, onOpen, onDeleteEntry }) {
+/* The dictionary holds ONLY the words you classified:
+     ⭐ مهمة جدا window · ✓ مهمة window.
+   Words saved by older versions (before classification existed) wait in a third window until you classify or clear them. */
+export default function WordsScreen({ words, onOpen, onClearLegacy, onDeleteWord }) {
+  const { map } = useVocab();
+  const [tab, setTab] = useState("2");
   const [q, setQ] = useState("");
-  const [mode, setMode] = useState("byq");
-  const [openId, setOpenId] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [review, setReview] = useState(false);
+  const due = dueWords(map).length;
   const needle = q.trim().toLowerCase();
 
-  const alpha = useMemo(() => {
-    const seen = new Map();
-    words.forEach((w) =>
-      wordLines(w.text).forEach((line) => {
-        const [term, ...rest] = line.split(SPLIT);
-        const key = term.trim().toLowerCase();
-        if (key && !seen.has(key)) seen.set(key, { term: term.trim(), rest: rest.join(" — "), qid: w.qid });
-      })
-    );
-    return [...seen.values()]
-      .sort((a, b) => a.term.localeCompare(b.term))
-      .filter((x) => !needle || (x.term + " " + x.rest).toLowerCase().includes(needle));
-  }, [words, needle]);
+  const very = useMemo(() => listLevel(map, 2), [map]);
+  const imp = useMemo(() => listLevel(map, 1), [map]);
+  const legacy = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    [...words].sort((a, b) => b.updatedAt - a.updatedAt).forEach((w) => wordLines(w.text).forEach((line) => {
+      const k = vocabKey(parseWord(line).term);
+      if (!k || seen.has(k) || map[k]) return;     // already classified (any level, including "not important")
+      seen.add(k);
+      out.push({ key: k, term: parseWord(line).term, line, qid: w.qid, title: w.title });
+    }));
+    return out.sort((a, b) => a.term.localeCompare(b.term));
+  }, [words, map]);
 
-  const grouped = useMemo(
-    () => [...words].sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((w) => ({ ...w, lines: wordLines(w.text).filter((l) => !needle || l.toLowerCase().includes(needle)) }))
-      .filter((w) => w.lines.length),
-    [words, needle]
-  );
-
-  const openEntry = openId ? grouped.find((g) => g.id === openId) : null;
+  const active = tab === "2" ? very : tab === "1" ? imp : legacy;
+  const list = active.filter((e) => !needle || e.line.toLowerCase().includes(needle));
 
   const copyAll = async () => {
-    const text = alpha.map((x) => (x.rest ? `${x.term} — ${x.rest}` : x.term)).join("\n");
-    try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1400); }
+    try { await navigator.clipboard.writeText(list.map((e) => e.line).join("\n")); setCopied(true); setTimeout(() => setCopied(false), 1400); }
     catch (e) { /* clipboard unavailable */ }
   };
+
+  const empty = tab === "2"
+    ? ["مفيش كلمات «مهمة جدا» لسه", "دوس ⭐ تحت أي كلمة في أي سؤال، أو دوس مرتين على أي كلمة إنجليزي وصنّفها."]
+    : tab === "1"
+      ? ["مفيش كلمات «مهمة» لسه", "دوس ✓ تحت أي كلمة تعوز تحفظها. الكلمات اللي مش مصنّفة ما بتتحفظش في القاموس."]
+      : ["مفيش كلمات قديمة غير مصنّفة", ""];
 
   return (
     <div className="page page-wide sec-violet">
       <div className="page-head">
         <h1>قاموس الكلمات</h1>
-        <button onClick={copyAll} className="btn btn-ghost btn-sm">
-          <Icon name={copied ? "check" : "copy"} size={16} /> نسخ الكل
+        <button onClick={() => setReview(true)} className="btn btn-teal btn-sm" disabled={!very.length && !imp.length}>
+          <Icon name="refresh" size={16} /> راجع {due ? `(${due})` : ""}
         </button>
+        <button onClick={copyAll} className="btn btn-ghost btn-sm" disabled={!list.length}>
+          <Icon name={copied ? "check" : "copy"} size={16} /> نسخ {tab === "2" ? "المهمة جدا" : tab === "1" ? "المهمة" : "الكل"}
+        </button>
+      </div>
+
+      <div className="dict-tabs" role="tablist" aria-label="نوافذ القاموس" style={legacy.length ? { gridTemplateColumns: "1fr 1fr 1fr" } : undefined}>
+        <button type="button" role="tab" aria-selected={tab === "2"} className="dict-tab" data-l="2" data-on={tab === "2"} onClick={() => setTab("2")}>
+          <b>{very.length}</b><small>⭐ مهمة جدا</small>
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "1"} className="dict-tab" data-l="1" data-on={tab === "1"} onClick={() => setTab("1")}>
+          <b>{imp.length}</b><small>✓ مهمة</small>
+        </button>
+        {legacy.length > 0 && (
+          <button type="button" role="tab" aria-selected={tab === "0"} className="dict-tab" data-l="0" data-on={tab === "0"} onClick={() => setTab("0")}>
+            <b>{legacy.length}</b><small>قديمة غير مصنّفة</small>
+          </button>
+        )}
       </div>
 
       <div className="search">
         <Icon name="search" size={18} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="دوّر على مصطلح…" className="input" dir="auto" />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="دوّر على كلمة…" className="input" dir="auto" />
       </div>
 
-      <div className="seg">
-        {[["byq", "حسب السؤال"], ["alpha", "أبجدي"]].map(([id, label]) => (
-          <button key={id} onClick={() => { setMode(id); setOpenId(null); }} data-on={mode === id} className="chip">{label}</button>
-        ))}
-      </div>
+      {tab === "0" && legacy.length > 0 && (
+        <div className="qdetail-actions" style={{ marginTop: 12 }}>
+          <p className="words-count" style={{ flex: 1 }}>كلمات اتحفظت قبل ما التصنيف يتضاف. صنّف اللي يهمك، وامسح الباقي.</p>
+          <ConfirmButton label="امسح القديمة" confirmLabel="تأكيد المسح؟" onConfirm={onClearLegacy} />
+        </div>
+      )}
 
-      {words.length === 0 ? (
-        <div className="card empty">
+      {list.length === 0 ? (
+        <div className="card empty" style={{ marginTop: 14 }}>
           <span className="empty-ico"><Icon name="library" size={32} /></span>
-          <b>القاموس فاضي لحد دلوقتي</b>
-          <p>أي كلمات جديدة هتتضاف هنا تلقائياً لما تحفظ سؤال.</p>
-        </div>
-      ) : mode === "alpha" ? (
-        <div className="wlist">
-          {alpha.length === 0 && <p style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>مفيش نتائج.</p>}
-          {alpha.map((x, i) => <WordCard key={x.term} line={x.rest ? `${x.term} — ${x.rest}` : x.term} ahead={alpha.slice(i + 1, i + 3).map((y) => y.term).join("\n")} />)}
-        </div>
-      ) : openEntry ? (
-        <div>
-          <div className="qdetail-head">
-            <button onClick={() => setOpenId(null)} className="iconbtn" aria-label="كل الأسئلة"><Icon name="back" size={19} /></button>
-            <h1 dir="auto">{openEntry.title}</h1>
-          </div>
-          <div className="qdetail-actions">
-            <button onClick={() => onOpen(openEntry.qid)} className="btn btn-ghost btn-sm"><Icon name="fileText" size={16} /> افتح السؤال</button>
-            <ConfirmButton label="حذف الكلمات" onConfirm={() => { onDeleteEntry(openEntry.id); setOpenId(null); }} />
-          </div>
-          <p className="words-count">{openEntry.lines.length} كلمة / عبارة</p>
-          <div className="words">
-            {openEntry.lines.map((l, i) => <WordCard key={i} line={l} ahead={openEntry.lines.slice(i + 1, i + 3).map((x) => x.split(SPLIT)[0].trim()).join("\n")} />)}
-          </div>
+          <b>{needle ? "مفيش نتائج." : empty[0]}</b>
+          {!needle && empty[1] && <p>{empty[1]}</p>}
         </div>
       ) : (
-        <div className="qfolders">
-          {grouped.length === 0 && <p style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>مفيش نتائج.</p>}
-          {grouped.map((w) => (
-            <button key={w.id} onClick={() => setOpenId(w.id)} className="card qfolder">
-              <span className="qf-ico"><Icon name="bookOpen" size={22} /></span>
-              <span className="qf-body">
-                <h3 dir="auto">{w.title}</h3>
-                <p>{fmtDate(w.updatedAt)}</p>
-              </span>
-              <span className="qf-count">{w.lines.length}</span>
-              <span className="qf-go"><Icon name="back" size={18} /></span>
-            </button>
+        <div className="wlist" style={{ marginTop: 14 }}>
+          {list.map((e, i) => (
+            <div key={e.key || e.term}>
+              <WordCard onDelete={() => onDeleteWord(e.term)} line={e.line} src={{ qid: e.qid, title: e.title }} ahead={list.slice(i + 1, i + 2).map((y) => y.term).join("\n")} />
+              {e.qid && <button type="button" className="dict-src" onClick={() => onOpen(e.qid)} dir="auto">من: {e.title || "السؤال"}</button>}
+            </div>
           ))}
         </div>
       )}
+    {review && <ReviewModal onClose={() => setReview(false)} />}
     </div>
   );
 }

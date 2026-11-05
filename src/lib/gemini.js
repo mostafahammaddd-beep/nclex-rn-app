@@ -453,6 +453,10 @@ function raceModels({ apiKey, models, run, hedgeMs, signal, onText }) {
 
 /* public: run one task against a list of candidate models */
 export function runTask({ apiKey, models, task, system, parts, spec, maxOut, hedgeMs, firstMs, idleMs, signal, onText }) {
+  /* callers that only want the final text (word meaning, picture prompt, topics …) pass no onText / signal:
+     the engine calls both unconditionally, so give it harmless defaults here, once, for every caller */
+  if (typeof onText !== "function") onText = () => {};
+  if (!signal) signal = new AbortController().signal;
   return raceModels({
     apiKey, models, hedgeMs, signal, onText,
     run: (model, sig, emit, alive) => attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal: sig, onText: emit, onAlive: alive, firstMs, idleMs }),

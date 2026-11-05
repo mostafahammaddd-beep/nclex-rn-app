@@ -61,3 +61,21 @@ export function setLimit(n) {
   try { window.localStorage.setItem(LS_LIMIT, JSON.stringify({ n: Math.max(1, Math.round(+n) || DEFAULT_LIMIT), learned: false })); } catch (e) { /* ignore */ }
   save(load());
 }
+
+/* Each API key has its own quota. When a DIFFERENT key becomes the active one, the old key's counter and the limit
+   learned from it are deleted and counting starts again from 0 for the new key. Same key again → nothing changes. */
+const LS_KEY = "nclex:usage:key";
+const tagOf = (k) => { const t = String(k || "").trim(); return t ? `${t.length}:${t.slice(-10)}` : ""; };
+export function syncUsageKey(apiKey) {
+  const tag = tagOf(apiKey);
+  if (!tag) return false;
+  let old = null;
+  try { old = window.localStorage.getItem(LS_KEY); } catch (e) { /* ignore */ }
+  if (old === tag) return false;
+  try {
+    window.localStorage.setItem(LS_KEY, tag);
+    if (old !== null) { window.localStorage.removeItem(LS); window.localStorage.removeItem(LS_LIMIT); }   // first run: keep what was counted so far
+  } catch (e) { /* ignore */ }
+  try { window.dispatchEvent(new Event("nclex-usage")); } catch (e) { /* ignore */ }
+  return old !== null;
+}

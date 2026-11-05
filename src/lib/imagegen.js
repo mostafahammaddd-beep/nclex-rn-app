@@ -1,27 +1,24 @@
-/* ───────────── Pictures in the chat — three engines, tried in order ─────────────
-   Google does NOT give image generation to free API keys (confirmed by Google's own pricing page and forum staff).
-   So the chat has two engines that work with a FREE key, and keeps Google's own image model for keys with billing:
+/* ───────────── Pictures in the chat ─────────────
+   Google does NOT give image generation to free API keys, so the default engine is the infographic:
 
-     diagram  Gemini's free TEXT model writes an SVG drawing: labelled schemes, flow-charts, cycles, mnemonic cards.
-              Always works with a free key, the words inside are spelled right (the thing that matters for study).
-     art      a real text-to-image model (FLUX) through Pollinations.ai — free, no key, no sign-up. The words
-              "no text inside the picture" are added, because image models cannot spell. ~1 picture / 15 s.
+     diagram  the free TEXT model writes a tiny JSON, our own code lays it out (see infographic.js). Fast, tidy, words spelled right.
      gemini   Google's Nano Banana models — only works when the API key has billing enabled.
 
-   Order for each choice:  diagram → [diagram]   art → [art, diagram]   gemini → [gemini, art, diagram]  */
+   Order:  diagram → [diagram]   gemini → [gemini, diagram]
+   (The free "real picture" engine, Pollinations/FLUX, was removed: slow, unreliable and the pictures were not good enough.) */
 
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { getModelLists, runTask, generateImage } from "./gemini.js";
 import { sourceParts } from "./docs.js";
 import { fixText } from "./text.js";
+import { INFO_SYSTEM, parseInfo, renderInfographic } from "./infographic.js";
 import { imagePrompt } from "./chat.js";
 
 export const ENGINES = [
   { id: "diagram", label: "رسم توضيحي", hint: "دقيق وبعناوين صح · مجاني" },
-  { id: "art", label: "صورة فنية AI", hint: "صورة حقيقية · مجاني بدون مفتاح" },
   { id: "gemini", label: "Gemini 💳", hint: "أعلى جودة · بيحتاج Billing" },
 ];
-const LABEL = { diagram: "رسم توضيحي", art: "صورة فنية", gemini: "Gemini" };
+const LABEL = { diagram: "رسم توضيحي", gemini: "Gemini" };
 const LS_ENGINE = "nclex:imgengine";
 const LS_BLOCK = "nclex:imgblock:gemini";
 
@@ -52,80 +49,60 @@ export function cleanSvg(raw) {
   return s;
 }
 
-const DIAGRAM_SYSTEM = `You are a medical illustrator and information designer. You draw clean, accurate, well-labelled educational diagrams for an Arabic-speaking nursing student who is preparing for the NCLEX-RN.
+const DIAGRAM_SYSTEM = `You are a top information designer. You make beautiful, cheerful, perfectly organised educational infographics for an Arabic-speaking nursing student preparing for the NCLEX-RN.
 
-OUTPUT: ONE self-contained SVG and NOTHING else — no markdown fence, no explanation. It starts with <svg and ends with </svg>.
+OUTPUT: ONE self-contained SVG and NOTHING else (no markdown, no comments). It starts with <svg and ends with </svg>.
 
-TECHNICAL RULES (the SVG is shown inside an <img>, so anything outside these rules breaks):
-- xmlns="http://www.w3.org/2000/svg" and viewBox="0 0 1200 800" (use 0 0 900 900 for a cycle or a body diagram). No width/height in px.
-- No <script>, no <foreignObject>, no <image>, no external URLs, no @import, no web fonts. Only shapes, paths, text, gradients and markers defined inside <defs>.
-- font-family="Arial, Helvetica, sans-serif". Text sizes 22 to 40. Every piece of text stays fully inside the viewBox and never overlaps another text or a shape that hides it. Leave 24px padding.
-- Start with a white background rect. Palette: ink #0B2A30, teal #0E7C8F, sky #25A3DC, coral #E8664D, amber #F2B134, violet #6B5BD2, green #2FA56B, soft fills #EAF6F8 / #FFF4E0. Strokes 3 to 5.
+TECH (the SVG is shown inside an <img>): xmlns="http://www.w3.org/2000/svg", viewBox="0 0 1200 800" (900 900 for a cycle). No px width/height. No <script>, <foreignObject>, <image>, external URL, @import or web font. font-family="Arial, Helvetica, sans-serif". Keep the code SHORT: one <style> block with reusable classes, integers only, <use> for repeated shapes, gradients and one soft-shadow filter (feGaussianBlur) inside <defs>.
+Palette: ink #0B2A30, teal #0E7C8F, sky #25A3DC, coral #E8664D, amber #F2B134, violet #6B5BD2, green #2FA56B, soft #EAF6F8 / #FFF4E0. Background: a very light gradient (#F4FBFC to #FFFFFF).
 
-DESIGN RULES:
-- One idea per drawing: a title at the top (English, big), then the diagram, then (only if needed) a small legend. Number steps when order matters. Arrows: draw them with <marker> definitions.
-- Labels are in ENGLISH (spelled exactly right), short (1 to 4 words). Arabic labels only if the student asks, and then use direction="rtl" and text-anchor="middle".
-- Medical accuracy first: a schematic is fine, but never invent anatomy, values or drugs. Show the normal vs abnormal, the cause → effect chain, the decision tree or the mnemonic that the student asked for.
-- Make it beautiful and uncluttered: rounded rectangles, consistent spacing, colour used for meaning (coral = danger / abnormal, green = safe / normal, amber = caution).
+LAYOUT (this is what makes it look professional):
+1. Plan a grid first: 40px margins, equal gaps. Header band (rounded, dark teal gradient, y 30-130) with the English title in white (48px bold) and a short subtitle in sky blue (26px).
+2. Under it ONE clear structure: tree (root on top, 3-4 cards joined by elbow connectors) | numbered steps left to right with chevron arrows | cycle on a circle | 2-column compare with a "VS" badge | cause-to-effect chain | mnemonic letter cards.
+3. Cards: equal size, rounded 24, white fill, a coloured header strip (about 64px) with white heading text, soft shadow. At most 4 bullets per card, each 1 to 5 words.
+4. TEXT SIZE: headings 32, body 28, NEVER below 26. At most about 60 words in total. If it does not fit, cut words, never shrink the font. Roughly 14px per character at 28px: split long labels into short lines with separate <text> elements and make sure each line fits inside its card.
+5. Fill the canvas: the content uses at least 85% of the width and height, no big empty areas, nothing overlapping, everything centred on its card (text-anchor="middle").
+6. One simple icon per card: a coloured circle with a symbol, or one emoji (48px) in the header. Colour carries meaning: coral danger/abnormal, green safe/normal, amber caution, violet info, sky neutral, teal main.
+7. If there is a key exam point, finish with a rounded "NCLEX Tip" strip (fill #FFF4E0, 26px text, one short sentence).
 
-Before you output, check silently: well-formed XML, every tag closed, every label readable and inside the canvas, nothing overlaps.`;
+Labels are in ENGLISH, spelled exactly right. Arabic only if the student asks (direction="rtl", text-anchor="middle"). Medical accuracy first: never invent values, anatomy or drugs.
+Before you output, check silently: well-formed XML, every tag closed, every text inside its card and the canvas.`;
 
+const INFO_CACHE = new Map();
 async function runDiagram({ apiKey, ctx, request, atts, signal }) {
   const lists = getModelLists(apiKey);
   const refs = atts && atts.length ? sourceParts({ kind: "bundle", items: atts }, null) : [];
+  /* fast path: tiny JSON from the model + our own layout engine (seconds, always tidy, never overflows). Same request again → instant (cache). */
+  const ckey = `${request.trim().toLowerCase()}|${cap(ctx.question, 300)}`;
+  if (INFO_CACHE.has(ckey)) return { ...INFO_CACHE.get(ckey) };
+  let bad = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const j = await runTask({
+        apiKey, task: "lesson:diagram", signal, models: [...lists.fast, ...lists.pro],
+        system: INFO_SYSTEM + (bad ? `\n\nYour previous reply could not be drawn (${bad}). Reply again with a valid JSON object that follows the rules.` : ""),
+        parts: [...refs, { text: `CONTEXT — the question and lesson he is studying:\n${cap(ctx.question, 1500)}\n${cap(ctx.explanation, 1500)}\n\nSTUDENT REQUEST: ${request}` }],
+        spec: { levels: ["low", "minimal"], budget: 512 }, maxOut: 3500, hedgeMs: 5000, firstMs: 30000, idleMs: 20000,
+      });
+      const res = { mime: "image/svg+xml", data: toB64(renderInfographic(parseInfo(j.text))), text: "" };
+      if (INFO_CACHE.size > 24) INFO_CACHE.delete(INFO_CACHE.keys().next().value);
+      INFO_CACHE.set(ckey, res);
+      return { ...res };
+    } catch (e) { if (e && e.name === "AbortError") throw e; bad = String((e && e.message) || "invalid").slice(0, 80); }
+  }
+  /* last resort: free-form SVG written by the model (slower, less tidy) */
   let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     const out = await runTask({
       apiKey, task: "lesson:diagram", signal, models: [...lists.fast, ...lists.pro],
       system: DIAGRAM_SYSTEM + (last ? `\n\nYour previous SVG was not valid XML (${last}). Output a corrected, well-formed SVG.` : ""),
       parts: [...refs, { text: `CONTEXT — the question and lesson he is studying:\n${cap(ctx.question, 1800)}\n${cap(ctx.explanation, 1800)}\n\nSTUDENT REQUEST: ${request}\n\nDraw it as one SVG.` }],
-      spec: { levels: ["low", "minimal"], budget: 1024 }, maxOut: 16000, hedgeMs: 12000, firstMs: 90000, idleMs: 70000,
+      spec: { levels: ["minimal", "low"], budget: 0 }, maxOut: 9000, hedgeMs: 15000, firstMs: 60000, idleMs: 45000,
     });
     try { return { mime: "image/svg+xml", data: toB64(cleanSvg(out.text)), text: "" }; }
     catch (e) { last = e.svgError || e.message; if (attempt) throw e; }
   }
   throw new Error("الرسم ما طلعش صح. جرّب توصفه بشكل تاني.");
-}
-
-/* ── art: Pollinations (FLUX) ── */
-async function artPrompt({ apiKey, ctx, request, signal }) {
-  const lists = getModelLists(apiKey);
-  const out = await runTask({
-    apiKey, task: "word", signal, models: [...lists.fast, ...lists.pro],
-    system: `You write prompts for a text-to-image model (FLUX). Output ONE English prompt, at most 80 words, nothing else.
-Describe a clean, accurate, flat-colour educational medical illustration on a plain white background, with clear shapes and soft colours. The model cannot spell, so the picture must contain NO words, NO letters, NO numbers and NO labels. Describe the scene visually and concretely. Be medically accurate.`,
-    parts: [{ text: `Context (what the student studies):\n${cap(ctx.question, 700)}\n${cap(ctx.explanation, 700)}\n\nThe student asks for: ${request}` }],
-    spec: { levels: ["minimal", "low"], budget: 0 }, maxOut: 400, hedgeMs: 3500, firstMs: 25000, idleMs: 20000,
-  });
-  const p = String(out.text || "").replace(/["\n]+/g, " ").replace(/\s+/g, " ").trim();
-  return p || request;
-}
-
-async function fetchBlob(url, signal) {
-  let r;
-  try { r = await fetch(url, { signal }); }
-  catch (e) {
-    if (e && e.name === "AbortError") throw e;
-    if (!Capacitor.isNativePlatform()) throw e;
-    const n = await CapacitorHttp.request({ url, method: "GET", responseType: "blob", readTimeout: 120000, connectTimeout: 30000 });   // WebView could not reach it, native can
-    return { status: n.status, mime: (n.headers && (n.headers["Content-Type"] || n.headers["content-type"])) || "image/jpeg", b64: n.data, size: String(n.data || "").length * 0.75 };
-  }
-  const blob = await r.blob();
-  const b64 = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(",")[1] || ""); fr.onerror = () => rej(new Error("read")); fr.readAsDataURL(blob); });
-  return { status: r.status, mime: blob.type || "image/jpeg", b64, size: blob.size };
-}
-
-async function runArt({ apiKey, ctx, request, signal, onStatus }) {
-  const prompt = await artPrompt({ apiKey, ctx, request, signal });
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&model=flux&nologo=true&seed=${Math.floor(Math.random() * 1e6)}`;
-  let res = await fetchBlob(url, signal);
-  if (res.status === 429) {                                          // anonymous tier: one picture every ~15 s
-    onStatus && onStatus("wait");
-    await new Promise((ok, no) => { const t = setTimeout(ok, 16000); signal && signal.addEventListener("abort", () => { clearTimeout(t); no(abortError()); }, { once: true }); });
-    res = await fetchBlob(url, signal);
-  }
-  if (res.status !== 200 || !/^image\//.test(res.mime) || res.size < 3000) throw new Error(res.status === 429 ? "خدمة الصور المجانية مشغولة دلوقتي." : "خدمة الصور المجانية ما ردّتش.");
-  return { mime: res.mime, data: res.b64, text: "" };
 }
 
 /* ── Google's own model (only with billing) ── */
@@ -141,11 +118,11 @@ async function runGemini({ apiKey, ctx, request, atts, signal }) {
   }
 }
 
-const RUN = { diagram: runDiagram, art: runArt, gemini: runGemini };
+const RUN = { diagram: runDiagram, gemini: runGemini };
 
 /* → { mime, data, text, engine, notes[] }   notes = what was tried and failed on the way */
 export async function makePicture({ engine, apiKey, ctx, request, atts = [], signal, onStatus }) {
-  const order = engine === "gemini" ? ["gemini", "art", "diagram"] : engine === "art" ? ["art", "diagram"] : ["diagram"];
+  const order = engine === "gemini" ? ["gemini", "diagram"] : ["diagram"];
   const notes = [];
   for (let i = 0; i < order.length; i++) {
     const e = order[i];
