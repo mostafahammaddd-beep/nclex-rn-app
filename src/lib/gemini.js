@@ -12,6 +12,11 @@
      dies while thinking is replaced by the next one before the user has seen anything.
    • systemInstruction carries the static prompt → Gemini's implicit cache can reuse it between runs.
    • Models that are unavailable for the key (404 / quota 0) are remembered for 6 h, even across app restarts.
+   • v3.13 — RETIRED models: Google keeps listing gemini-2.5-* in ListModels but answers 404 "no longer available to
+     new users" for keys that never used them. Such a model is now (1) dropped from the candidate lists, (2) remembered
+     as retired for 7 days, (3) replaced at once by the model Google names in the error message, and (4) triggers a
+     background refresh of the model list. When EVERY model fails, the error shown is the most informative one
+     (rate limit / server / timeout beat "model unavailable"), plus a one-line list of what each model answered.
    • If WebView fetch cannot reach Google (CORS / network), it falls back to the native Capacitor HTTP client
      (non-streaming) automatically.                                                                       */
 
@@ -24,11 +29,15 @@ export const API_BASE = ENV.VITE_API_BASE || "https://generativelanguage.googlea
 
 /* ── errors ── */
 
+const RETIRED_RE = /no longer available|not available to new users|has been (?:shut ?down|retired|deprecated)|is deprecated/;
+
 export function friendlyError(status, message) {
   const m = (message || "").toLowerCase();
   if (/api key|api_key/.test(m) || status === 401 || status === 403)
     return "مفتاح الـ API مش مقبول أو مالوش صلاحية. اتأكد من المفتاح من أيقونة 🔑 فوق.";
+  if (status === 429 && /per\s?day|daily|perday/.test(m)) return "خلصت حصة الطلبات اليومية بتاعة مفتاحك. بتتجدد منتصف الليل بتوقيت المحيط الهادي، أو استخدم مفتاح تاني.";
   if (status === 429) return "وصلت للحد المسموح من الطلبات. استنى دقيقة وجرّب تاني.";
+  if (status === 404 && RETIRED_RE.test(m)) return "الموديل ده اتقفل على المفاتيح الجديدة. التطبيق بيحوّل لموديل أحدث لوحده، جرّب تاني.";
   if (status === 400 && /pdf|document/.test(m)) return "ملف الـ PDF مش مقروء أو مش مدعوم. جرّب ملف تاني أو صوّر الصفحة.";
   if (status === 400 && m.includes("image")) return "الصورة مش واضحة أو مش مدعومة. جرّب صورة تانية.";
   if (status >= 500) return "سيرفرات Google مشغولة دلوقتي. جرّب تاني بعد شوية.";
@@ -54,6 +63,10 @@ function classify(status, message) {
   );
   if (status === 429) noteQuota(message);
   err.dead = status === 404 || (status === 429 && /limit:\s*0/.test(m)) || (status === 403 && !err.fatal);
+  /* "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview …" */
+  err.retired = status === 404 && RETIRED_RE.test(m);
+  const rep = err.retired && String(message || "").match(/(?:use|using|switch to|migrate to)\s+(?:the\s+)?(?:models\/)?(gemini-[a-z0-9.\-]+)/i);
+  if (rep) err.replacement = rep[1].toLowerCase().replace(/[.,;:\-]+$/, "");
   return err;
 }
 
@@ -96,40 +109,68 @@ export async function rawRequest(method, url, body, timeoutMs) {
 
 /* ── model lists (cached, never blocking) ── */
 
+/* Only "-latest" aliases + the current generation: Google moves the aliases forward by itself, so these keep working
+   when a specific model is retired. gemini-2.5-* is NOT here on purpose (404 for every key that never used it). */
 const DEFAULT_LISTS = {
-  fast: ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest"],
-  pro: ["gemini-pro-latest", "gemini-2.5-pro"],
+  fast: ["gemini-flash-latest", "gemini-flash-lite-latest"],
+  pro: ["gemini-pro-latest", "gemini-3.1-pro-preview"],
 };
-const LS_MODELS = "nclex:models:v3";
+const LS_MODELS = "nclex:models:v4";
 const keyTag = (k) => (k || "").slice(-8);
 let _lists = null;
 
 /* models that are unavailable for this key (404 / quota 0): remembered across restarts for a few hours,
-   so the first analysis of a new session does not waste a round trip on a model that cannot answer */
-const LS_DEAD = "nclex:dead:v1";
+   so the first analysis of a new session does not waste a round trip on a model that cannot answer.
+   RETIRED models ("no longer available to new users") are remembered for a week and survive list refreshes. */
+const LS_DEAD = "nclex:dead:v2";
 const DEAD_TTL = 6 * 3600e3;
+const RETIRED_TTL = 7 * 864e5;
 let _deadMem = null;
-function deadMap(apiKey) {
+function deadState(apiKey) {
   const k = keyTag(apiKey);
-  if (_deadMem && _deadMem.k === k) return _deadMem.map;
-  let map = {};
-  try { const raw = JSON.parse(window.localStorage.getItem(LS_DEAD)); if (raw && raw.k === k && raw.map) map = raw.map; } catch (e) { /* ignore */ }
-  _deadMem = { k, map };
-  return map;
+  if (_deadMem && _deadMem.k === k) return _deadMem;
+  let st = { k, map: {}, ret: {} };
+  try { const raw = JSON.parse(window.localStorage.getItem(LS_DEAD)); if (raw && raw.k === k) st = { k, map: raw.map || {}, ret: raw.ret || {} }; } catch (e) { /* ignore */ }
+  _deadMem = st;
+  return st;
 }
+const saveDead = (st) => { try { window.localStorage.setItem(LS_DEAD, JSON.stringify(st)); } catch (e) { /* ignore */ } };
 const deadSet = (apiKey) => {
-  const map = deadMap(apiKey), now = Date.now();
-  return new Set(Object.keys(map).filter((m) => map[m] > now));
+  const st = deadState(apiKey), now = Date.now();
+  return new Set([...Object.keys(st.map).filter((m) => st.map[m] > now), ...Object.keys(st.ret).filter((m) => st.ret[m] > now)]);
 };
-const addDead = (apiKey, model) => {
-  const map = deadMap(apiKey);
-  map[model] = Date.now() + DEAD_TTL;
-  try { window.localStorage.setItem(LS_DEAD, JSON.stringify({ k: keyTag(apiKey), map })); } catch (e) { /* ignore */ }
+const addDead = (apiKey, model, retired) => {
+  const st = deadState(apiKey);
+  if (retired) st.ret[model] = Date.now() + RETIRED_TTL; else st.map[model] = Date.now() + DEAD_TTL;
+  saveDead(st);
 };
-const clearDead = () => {
-  _deadMem = null;
-  try { window.localStorage.removeItem(LS_DEAD); } catch (e) { /* ignore */ }
+const clearDead = (apiKey) => {            // a fresh model list gives temporary failures a new chance; retired models stay retired
+  const st = deadState(apiKey);
+  st.map = {};
+  saveDead(st);
 };
+
+/* the replacement Google names inside a "no longer available" error is trusted for the next analysis too */
+const LS_SUGGEST = "nclex:suggest:v1";
+const readSuggest = (apiKey) => {
+  try { const r = JSON.parse(window.localStorage.getItem(LS_SUGGEST)); if (r && r.k === keyTag(apiKey) && Date.now() - r.t < 30 * 864e5) return r.models || []; } catch (e) { /* ignore */ }
+  return [];
+};
+const addSuggest = (apiKey, model) => {
+  if (!/^gemini-[a-z0-9.\-]+$/.test(model || "")) return;
+  const cur = readSuggest(apiKey);
+  if (cur.includes(model)) return;
+  try { window.localStorage.setItem(LS_SUGGEST, JSON.stringify({ k: keyTag(apiKey), t: Date.now(), models: [model, ...cur].slice(0, 4) })); } catch (e) { /* ignore */ }
+  _lists = null;                              // lists are rebuilt with the suggestion on the next read
+};
+
+/* a retired model → refresh the model list from Google in the background (at most once every 10 minutes) */
+let _selfHealAt = 0;
+function selfHeal(apiKey) {
+  if (!apiKey || Date.now() - _selfHealAt < 10 * 60e3) return;
+  _selfHealAt = Date.now();
+  refreshModels(apiKey, { force: true }).catch(() => {});
+}
 
 const modelRank = (n) => {
   const tier = /pro/.test(n) ? 2 : /lite/.test(n) ? 0 : 1;
@@ -138,30 +179,48 @@ const modelRank = (n) => {
   return tier * 1000 + base - (/preview|exp/.test(n) ? 1 : 0);
 };
 
+const withSuggestions = (apiKey, lists) => {
+  const dead = deadSet(apiKey);
+  const extra = readSuggest(apiKey).filter((m) => !dead.has(m));
+  const ok = (arr) => arr.filter((m) => !deadState(apiKey).ret[m] || deadState(apiKey).ret[m] <= Date.now());
+  const pro = [...extra.filter((m) => /pro/.test(m)), ...lists.pro];
+  const fast = [...extra.filter((m) => !/pro/.test(m)), ...lists.fast];
+  return { fast: [...new Set(ok(fast))], pro: [...new Set(ok(pro))] };
+};
+
 export function getModelLists(apiKey) {
-  if (_lists && _lists.k === keyTag(apiKey)) return _lists.lists;
+  if (_lists && _lists.k === keyTag(apiKey) && _lists.out) return _lists.out;
+  let base = DEFAULT_LISTS;
   try {
     const raw = JSON.parse(window.localStorage.getItem(LS_MODELS));
-    if (raw && raw.k === keyTag(apiKey) && Date.now() - raw.t < 3 * 864e5) { _lists = raw; return raw.lists; }
+    if (raw && raw.k === keyTag(apiKey) && Date.now() - raw.t < 3 * 864e5) base = raw.lists;
   } catch (e) { /* ignore */ }
-  return DEFAULT_LISTS;
+  const out = withSuggestions(apiKey, base);
+  _lists = { k: keyTag(apiKey), lists: base, out };
+  return out;
 }
+
+/* generation number of a model id: gemini-3.1-pro-preview → 3.1 ; "-latest" aliases have none → treated as newest */
+const genOf = (n) => { const v = (n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1]; return v ? parseFloat(v) : 99; };
 
 export async function refreshModels(apiKey, { force = false } = {}) {
   if (!apiKey) return DEFAULT_LISTS;
   if (!force) {
     try {
       const raw = JSON.parse(window.localStorage.getItem(LS_MODELS));
-      if (raw && raw.k === keyTag(apiKey) && Date.now() - raw.t < 864e5) { _lists = raw; return raw.lists; }
+      if (raw && raw.k === keyTag(apiKey) && Date.now() - raw.t < 864e5) { _lists = null; return getModelLists(apiKey); }
     } catch (e) { /* ignore */ }
   }
   const { status, json } = await rawRequest("GET", `${API_BASE}?pageSize=200&key=${encodeURIComponent(apiKey)}`, undefined, 30000);
   if (status !== 200) throw classify(status, json?.error?.message || "");
-  const found = (json.models || [])
+  const all = (json.models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent") && /^models\/gemini-/.test(m.name)
-      && !/image|tts|audio|live|embed|robotics|computer|learnlm|gemma|aqa|vision|deep-research|customtools/i.test(m.name))
-    .map((m) => m.name.replace("models/", ""))
-    .sort((x, y) => modelRank(y) - modelRank(x));
+      && !/image|tts|audio|live|embed|robotics|computer|learnlm|gemma|aqa|vision|deep-research|customtools|transcri|speech/i.test(m.name))
+    .map((m) => m.name.replace("models/", ""));
+  /* ListModels still lists gemini-2.5-* although new keys get 404 on them → keep the 3.x generation (and the -latest aliases)
+     whenever it exists; the old generation is used only if nothing newer is listed at all */
+  const modern = all.filter((n) => genOf(n) >= 3);
+  const found = (modern.length ? modern : all).sort((x, y) => modelRank(y) - modelRank(x));
   const pro = found.filter((n) => /pro/.test(n)).slice(0, 3);
   const flash = found.filter((n) => !/pro/.test(n) && !/lite/.test(n)).slice(0, 3);
   const lite = found.filter((n) => /lite/.test(n)).slice(0, 1);
@@ -170,10 +229,10 @@ export async function refreshModels(apiKey, { force = false } = {}) {
     fast: fast.length ? fast : (pro.length ? pro : DEFAULT_LISTS.fast),
     pro: pro.length ? pro : (flash.length ? flash : DEFAULT_LISTS.pro),
   };
-  _lists = { k: keyTag(apiKey), t: Date.now(), lists };
-  clearDead();
-  try { window.localStorage.setItem(LS_MODELS, JSON.stringify(_lists)); } catch (e) { /* ignore */ }
-  return lists;
+  try { window.localStorage.setItem(LS_MODELS, JSON.stringify({ k: keyTag(apiKey), t: Date.now(), lists })); } catch (e) { /* ignore */ }
+  clearDead(apiKey);
+  _lists = null;
+  return getModelLists(apiKey);
 }
 
 export async function testConnection(apiKey) {
@@ -374,6 +433,19 @@ async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, 
    other candidates are cancelled. If the claimer dies before anything was shown, the race re-opens and the next
    model starts at once; if text was already shown, the error is reported (we never silently switch mid-answer). */
 
+/* When every model failed, show the error that tells the student what to DO, not just the last one that happened to fail:
+   a rate limit / server / network / timeout error beats "this model is unavailable". */
+function bestError(errs, tried) {
+  const real = errs.filter((e) => !e.dead);
+  const pick = real.length ? real[real.length - 1] : null;
+  const trail = tried.join(" | ").slice(0, 600);
+  if (pick) { pick.detail = [pick.detail, trail && trail !== pick.detail ? "المحاولات: " + trail : ""].filter(Boolean).join(" — "); return pick; }
+  const e = new Error("مفيش موديل شغّال على مفتاحك دلوقتي: كل الموديلات اللي جرّبها التطبيق اتقفلت أو مش متاحة للمفاتيح الجديدة. جرّب تدوس 🔑 ← \"اختبار الاتصال\" عشان يحدّث الموديلات، ولو فضل كده اعمل مفتاح جديد من Google AI Studio.");
+  e.detail = "المحاولات: " + trail;
+  e.dead = true;
+  return e;
+}
+
 function raceModels({ apiKey, models, run, hedgeMs, signal, onText }) {
   return new Promise((resolve, reject) => {
     const dead = deadSet(apiKey);
@@ -382,7 +454,8 @@ function raceModels({ apiKey, models, run, hedgeMs, signal, onText }) {
     if (!order.length) return reject(new Error("مفيش موديل متاح دلوقتي."));
 
     const ctrls = [];
-    let launched = 0, active = 0, winner = -1, shown = false, settled = false, lastErr = null, hedgeTimer = null;
+    const errs = [], tried = [];
+    let launched = 0, active = 0, winner = -1, shown = false, settled = false, hedgeTimer = null;
 
     const finish = (fn) => {
       if (settled) return;
@@ -413,6 +486,21 @@ function raceModels({ apiKey, models, run, hedgeMs, signal, onText }) {
       if (winner === -1 && launched < order.length && hedgeMs) hedgeTimer = setTimeout(launch, hedgeMs);
     };
 
+    /* a model failed → remember why, and let Google's own suggestion jump the queue */
+    const noteFailure = (model, err) => {
+      const code = err && (err.status || (err.timeout ? "timeout" : err.emptyReply ? "empty" : "net"));
+      tried.push(`${model} → ${code}${err && err.retired ? " (retired)" : ""}`);
+      errs.push(err);
+      if (err && err.dead) addDead(apiKey, model, !!err.retired);
+      if (err && err.retired) {
+        if (err.replacement) {
+          addSuggest(apiKey, err.replacement);
+          if (!order.includes(err.replacement) && !deadSet(apiKey).has(err.replacement)) order.splice(launched, 0, err.replacement);
+        }
+        selfHeal(apiKey);
+      }
+    };
+
     function launch() {
       if (settled || winner !== -1 || launched >= order.length) return;
       const i = launched++;
@@ -428,22 +516,22 @@ function raceModels({ apiKey, models, run, hedgeMs, signal, onText }) {
         active--;
         if (settled || !claim(i)) return;
         finish(() => resolve({ ...res, model }));
-      }).catch((err) => {
+      }).catch((e0) => {
+        const err = e0 || new Error("unknown");
         active--;
         if (settled || ctrl.signal.aborted) return;       // lost the race on purpose
-        if (err && err.dead) addDead(apiKey, model);
+        noteFailure(model, err);
         if (winner === i) {
           if (!shown && !err.fatal && launched < order.length) {   // died while thinking: hand over, nothing was shown
-            winner = -1; lastErr = err;
+            winner = -1;
             launch(); armHedge();
             return;
           }
           return finish(() => reject(err));                 // the winner died mid-answer
         }
-        lastErr = err;
         if (err.fatal) return finish(() => reject(err));
         if (launched < order.length) { launch(); armHedge(); }
-        else if (active === 0) finish(() => reject(lastErr));
+        else if (active === 0) finish(() => reject(bestError(errs, tried)));
       });
       armHedge();
     }

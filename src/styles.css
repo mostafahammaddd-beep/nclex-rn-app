@@ -611,6 +611,10 @@ img { display: block; max-width: 100%; }
 .wordpop-word { font-weight: 900; font-size: 17px; color: var(--teal-ink, var(--teal)); text-align: start; unicode-bidi: isolate; direction: ltr; text-align: right; }
 .wordpop-mean { font-weight: 800; font-size: 15px; color: var(--ink); word-break: normal; overflow-wrap: break-word; text-align: right; }
 .wordpop-mean[data-s="load"], .wordpop-mean[data-s="nokey"], .wordpop-mean[data-s="err"] { color: var(--ink-3); font-weight: 700; font-size: 13px; }
+.wordpop-retry { align-self: flex-end; margin-top: 4px; padding: 3px 12px; border-radius: 99px; font-size: 12px; font-weight: 800; color: var(--teal-ink, var(--teal)); background: var(--teal-soft); border: 1px solid var(--line-2); }
+/* selected sentence: wider bubble, the translation scrolls inside it when it is long */
+.wordpop-s { min-width: min(300px, calc(100vw - 20px)); max-width: min(400px, calc(100vw - 20px)); }
+.wordpop-s .wordpop-mean { font-size: 15.5px; line-height: 1.75; max-height: 36vh; overflow-y: auto; overscroll-behavior: contain; padding-inline-end: 2px; }
 
 /* ───────── chat: attachments + generated pictures ───────── */
 .chat[data-over="true"] { outline: 3px dashed var(--teal); outline-offset: -6px; }
